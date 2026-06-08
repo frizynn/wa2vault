@@ -49,3 +49,9 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# user data / secrets (belt-and-suspenders)
+.env
+.env.*
+contacts.json
+config.toml

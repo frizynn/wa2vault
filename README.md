@@ -1,13 +1,33 @@
 # wa2vault
 
-A personal, **read-only** tool that extracts the last N days of a specific
-WhatsApp chat, group, or channel (text, images, and voice notes), transcribes
-the voice notes to text **locally** (CPU), and writes a structured Markdown
-"message history" note into an [Obsidian](https://obsidian.md) vault so AI
-agents can read it.
+A **read-only** tool that extracts the last N days of a specific WhatsApp chat,
+group, or channel (text, images, and voice notes), transcribes voice notes to
+text **locally** (CPU), and writes a structured Markdown note into an
+[Obsidian](https://obsidian.md) vault so AI agents can read it.
 
-wa2vault never sends WhatsApp messages. Pair once, then run fast incremental
+wa2vault **never sends WhatsApp messages**. Pair once, then run fast incremental
 pulls.
+
+---
+
+> [!WARNING]
+> **Legal & Privacy — read before use**
+>
+> **Unofficial protocol / Terms of Service.** `wacli`, the WhatsApp data layer
+> used by this tool, speaks the *unofficial* WhatsApp Web multidevice protocol.
+> Using it almost certainly violates WhatsApp's Terms of Service. There is a real
+> risk — albeit low for read-only personal use — that WhatsApp may restrict or
+> ban the linked account. **You use this tool entirely at your own risk.**
+>
+> **Privacy of others.** Group chats and DMs contain messages written by other
+> people. Archiving and transcribing those messages may implicate privacy laws in
+> your jurisdiction (e.g. GDPR in the EU). You are solely responsible for
+> ensuring your use is lawful and for obtaining any consent required by applicable
+> law. This tool is intended for archiving **your own** conversations.
+>
+> **No warranty.** This software is provided "as is". See the [MIT LICENSE](LICENSE).
+
+---
 
 ## Architecture
 
@@ -55,21 +75,22 @@ config to point wacli at a custom store (passed through as `--store`).
 
 - **Python 3.12+** and [**uv**](https://docs.astral.sh/uv/) for environment
   management.
-- **ffmpeg** (used to decode WhatsApp Opus voice notes before transcription;
-  already present on the target machine).
+- **ffmpeg** on `PATH` (used to decode WhatsApp Opus voice notes before
+  transcription).
 - **wacli** v0.11.0 binary on `PATH` (install below).
 
 ## Install
 
-### 1. wa2vault (Python)
+### 1. Clone and install wa2vault
 
 ```bash
-cd ~/Documents/repos/wa2vault
+git clone https://github.com/frizynn/wa2vault.git
+cd wa2vault
 uv sync
 ```
 
 Run the CLI with `uv run wa2vault …` (or activate the venv and call
-`wa2vault`).
+`wa2vault` directly).
 
 ### 2. wacli (WhatsApp data layer)
 
@@ -101,7 +122,8 @@ binary fits, build from source with a Go 1.23+ toolchain
 
 ### 3. ffmpeg
 
-Already installed on the target machine. Otherwise: `sudo apt install ffmpeg`.
+On Debian/Ubuntu: `sudo apt install ffmpeg`. On macOS: `brew install ffmpeg`.
+On other systems, install via your package manager or from [ffmpeg.org](https://ffmpeg.org/download.html).
 
 ## Pairing runbook
 
@@ -149,16 +171,22 @@ On first run, wa2vault writes a TOML config to the user config dir (Linux:
 
 | Key             | Default                        | Meaning                                               |
 | --------------- | ------------------------------ | ----------------------------------------------------- |
-| `vault_dir`     | `~/Obsidian/wa2vault`          | Obsidian vault root for output.                       |
+| `vault_dir`     | `~/Obsidian/wa2vault`          | Obsidian vault root for output (the default is a suggestion; set this to any path you like). |
 | `output_subdir` | `Chats`                        | Subfolder inside the vault for chat notes.            |
 | `wacli_bin`     | `wacli`                        | wacli executable name/path.                           |
 | `wacli_db`      | *(empty → wacli default)*      | Custom wacli store dir; empty uses `~/.local/state/wacli`. |
 | `asr_backend`   | `faster-whisper`               | ASR backend (`faster-whisper` or `nemotron`).         |
 | `asr_model`     | `medium`                       | ASR model name/size.                                  |
-| `language`      | `es`                           | Default language hint (ISO-639-1).                    |
+| `language`      | `es`                           | Default language hint for transcription (ISO-639-1).  |
 | `default_days`  | `30`                           | Default `--days` window for `pull`.                   |
 | `sync_timeout`  | `90.0`                         | Max seconds the pull waits for the store sync before proceeding with the local store. Empty = wait forever. |
 | `cache_dir`     | platform cache dir             | Transcript cache + scratch files.                     |
+
+> [!NOTE]
+> **Transcription language defaults to `es` (Spanish).** If your chats are in
+> another language, set `language = "en"` (or the appropriate ISO-639-1 code)
+> in your `config.toml`, or export `WA2VAULT_LANGUAGE=en` before running. With
+> the wrong language hint, Whisper transcription quality degrades significantly.
 
 Any key can be overridden at runtime with a `WA2VAULT_*` environment variable
 (e.g. `WA2VAULT_LANGUAGE=en`), and `--config` selects an alternate config file.
@@ -168,31 +196,20 @@ Any key can be overridden at runtime with a `WA2VAULT_*` environment variable
 - **faster-whisper** (default): Whisper via CTranslate2, CPU with `int8`
   quantization. Decodes voice notes with ffmpeg to 16 kHz mono WAV before
   transcription.
-- **nemotron** (optional, future): an `nvidia/nemotron-3.5-asr-streaming-0.6b`
-  CPU backend, planned for a later release. Not implemented yet.
+- **nemotron** (optional, future): planned support for a lightweight CPU ASR
+  backend. **Not implemented yet.**
 
-## Honest caveats
+## Caveats
 
-**1. History is bounded.** A linked device only receives what your phone
-pushes. At pairing you get a full sync of up to roughly the **last ~1 year**,
-then **incremental** updates from then on. Reaching far-back history on demand
+**History is bounded.** A linked device only receives what your phone pushes.
+At pairing you get a full sync of up to roughly the **last ~1 year**, then
+**incremental** updates from then on. Reaching far-back history on demand
 (`wacli history backfill`) is **best-effort** — your phone may not have it, and
 **old media can expire** on WhatsApp's CDN, in which case it cannot be
 re-downloaded. Pull regularly to keep your local archive complete.
 
-**2. Unofficial client / ToS.** wacli is an unofficial WhatsApp Web client,
-which is technically against WhatsApp's Terms of Service. The strict
-**read-only, never-send** posture keeps ban risk low (anecdotally under ~2% per
-year) but **not zero**. Recommendation: link as a **secondary device** rather
-than your primary number, and avoid automated sending entirely (wa2vault never
-sends).
-
-## Project tracking
-
-Design decisions, research notes, and work-in-progress for this project live in
-the Obsidian vault **`wa2vault`** (`~/Obsidian/wa2vault/`), which also doubles as
-the default output target (`Chats/`). The repo and the vault deliberately share
-the name so tooling (and the SessionStart hook) can map one to the other.
+For the Terms of Service and privacy risks, see the warning block at the top of
+this document.
 
 ## License
 
