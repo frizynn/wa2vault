@@ -17,7 +17,6 @@ from wa2vault.models import MessageRecord
 from wa2vault.transcribe import get_transcriber
 from wa2vault.transcribe.base import Transcriber, TranscriptResult
 from wa2vault.transcribe.faster_whisper_backend import FasterWhisperTranscriber
-from wa2vault.transcribe.nemotron_backend import NemotronTranscriber
 
 
 def test_message_record_minimal() -> None:
@@ -80,14 +79,16 @@ def test_faster_whisper_transcribe_missing_file_raises(tmp_path: Path) -> None:
         transcriber.transcribe(tmp_path / "does-not-exist.ogg")
 
 
-def test_nemotron_backend_is_future_stub(tmp_path: Path) -> None:
+def test_nemotron_backend_selection_fails_fast() -> None:
+    """Selecting the not-yet-implemented 'nemotron' backend must fail immediately.
+
+    Config validation still accepts 'nemotron' (it stays in the AsrBackend
+    Literal), but the factory raises at selection time rather than returning a
+    transcriber that explodes only when first used.
+    """
     config = Config(asr_backend="nemotron")
-    transcriber = get_transcriber(config)
-    assert isinstance(transcriber, NemotronTranscriber)
-    audio = tmp_path / "note.ogg"
-    audio.write_bytes(b"")
-    with pytest.raises(NotImplementedError):
-        transcriber.transcribe(audio)
+    with pytest.raises(NotImplementedError, match="not implemented yet"):
+        get_transcriber(config)
 
 
 def test_unknown_backend_raises() -> None:

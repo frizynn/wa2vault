@@ -33,18 +33,17 @@ End-to-end flow of :func:`pull_chat`:
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import re
-
 from wa2vault.config import Config
 from wa2vault.contacts import ContactBook
 from wa2vault.models import MessageRecord
-from wa2vault.render import _slugify, render_markdown, write_note
-from wa2vault.transcribe import get_transcriber
+from wa2vault.render import render_markdown, slugify, write_note
+from wa2vault.transcribe import Transcriber, get_transcriber
 from wa2vault.transcribe.cache import TranscriptCache
 from wa2vault.wacli import ChatNotFound, ChatRef, WacliClient, WacliError
 
@@ -143,7 +142,7 @@ def pull_chat(
     # the contact. ChatNotFound / ChatNotUnique propagate to the caller.
     chatref = _resolve_chat(client, chat, config)
     chat_name = chatref.name or chatref.jid
-    chat_slug = _slugify(chat_name)
+    chat_slug = slugify(chat_name)
 
     # 3. Export the requested time window.
     since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -151,7 +150,7 @@ def pull_chat(
 
     # 3b. For DM chats, backfill missing/number-only sender names with the
     # resolved chat name so the rendered timeline shows the person, not a number.
-    _fill_dm_sender_names(records, chatref)
+    records = _fill_dm_sender_names(records, chatref)
 
     # 4. Media: materialize local files; copy images into the vault (relative
     # path), keep the local audio path for transcription. When media is
@@ -159,7 +158,7 @@ def pull_chat(
     # render as unavailable rather than leaking a non-vault-relative path.
     local_audio_paths: dict[str, Path] = {}
     if download_media:
-        _resolve_media(
+        records = _resolve_media(
             client,
             records,
             config=config,
@@ -168,12 +167,11 @@ def pull_chat(
             warnings=warnings,
         )
     else:
-        for record in records:
-            record.media_path = None
+        records = [record.model_copy(update={"media_path": None}) for record in records]
 
     # 5. Transcription (best-effort per message).
     if transcribe:
-        _transcribe_audio(
+        records = _transcribe_audio(
             records,
             config=config,
             local_audio_paths=local_audio_paths,
@@ -249,22 +247,27 @@ def _resolve_chat(client: WacliClient, chat: str, config: Config) -> ChatRef:
     return ChatRef(jid=resolved.jid, name=name, chat_type=resolved.chat_type)
 
 
-def _fill_dm_sender_names(records: list[MessageRecord], chatref: ChatRef) -> None:
-    """Backfill DM sender names that are missing or look like a bare number.
+def _fill_dm_sender_names(
+    records: list[MessageRecord], chatref: ChatRef
+) -> list[MessageRecord]:
+    """Return ``records`` with DM sender names that look like a bare number filled in.
 
     Only DM chats are touched (groups already carry real per-sender names). For
     each incoming message (``from_me is False``) whose ``sender_name`` is missing
-    or looks like a phone number / bare JID, set it to the resolved chat name so
-    the rendered timeline shows the person instead of digits.
+    or looks like a phone number / bare JID, the resolved chat name is set so the
+    rendered timeline shows the person instead of digits. The input records are
+    not mutated; a new list is returned.
     """
     if chatref.chat_type != "dm" or not chatref.name:
-        return
+        return list(records)
 
+    filled: list[MessageRecord] = []
     for record in records:
-        if record.from_me:
-            continue
-        if _is_missing_or_number(record.sender_name):
-            record.sender_name = chatref.name
+        if not record.from_me and _is_missing_or_number(record.sender_name):
+            filled.append(record.model_copy(update={"sender_name": chatref.name}))
+        else:
+            filled.append(record)
+    return filled
 
 
 def _is_missing_or_number(sender_name: str | None) -> bool:
@@ -282,43 +285,47 @@ def _resolve_media(
     chat_slug: str,
     local_audio_paths: dict[str, Path],
     warnings: list[str],
-) -> None:
-    """Materialize media for ``records`` (in place).
+) -> list[MessageRecord]:
+    """Return ``records`` with media materialized into the vault.
 
     For every media-bearing record, ``ensure_media`` returns a local path (or
     None when the attachment is expired/unavailable). Image files are copied
     into the vault attachments directory and ``media_path`` is set to the path
     **relative to the vault root** so Obsidian ``![[...]]`` embeds resolve;
-    other media keep ``media_path = None`` (audio is consumed via the
-    transcript, not the path). Local audio paths are recorded separately for the
-    transcription step.
+    other media get ``media_path = None`` (audio is consumed via the transcript,
+    not the path). Local audio paths are recorded in ``local_audio_paths`` for
+    the transcription step. The input records are not mutated; a new list is
+    returned.
     """
     attachments_dir = (
         config.vault_dir / config.output_subdir / _MEDIA_SUBDIR / chat_slug
     )
 
+    resolved: list[MessageRecord] = []
     for record in records:
         local = client.ensure_media(record)
         if local is None:
             # Reset any stale local path so the renderer shows the fallback.
-            record.media_path = None
+            resolved.append(record.model_copy(update={"media_path": None}))
             continue
 
         if record.kind == "image":
-            record.media_path = _copy_image_into_vault(
+            vault_path = _copy_image_into_vault(
                 local,
                 attachments_dir=attachments_dir,
                 vault_dir=config.vault_dir,
                 chat_slug=chat_slug,
                 warnings=warnings,
             )
+            resolved.append(record.model_copy(update={"media_path": vault_path}))
         elif record.kind in _AUDIO_KINDS:
             # Keep the local audio path for transcription only; the renderer
             # uses the transcript, not the path.
             local_audio_paths[record.id] = local
-            record.media_path = None
+            resolved.append(record.model_copy(update={"media_path": None}))
         else:
-            record.media_path = None
+            resolved.append(record.model_copy(update={"media_path": None}))
+    return resolved
 
 
 def _copy_image_into_vault(
@@ -351,40 +358,73 @@ def _transcribe_audio(
     config: Config,
     local_audio_paths: dict[str, Path],
     warnings: list[str],
-) -> None:
-    """Transcribe voice notes for ``records`` (in place), using the cache.
+) -> list[MessageRecord]:
+    """Return ``records`` with voice-note transcripts filled in, using the cache.
 
     Each ``ptt``/``audio`` record with a local audio file is transcribed at most
     once: a cache hit short-circuits the model, otherwise the audio is
     transcribed and the result is cached. A single transcription failure adds a
-    warning and is skipped, never aborting the whole pull.
+    warning and is skipped, never aborting the whole pull. The input records are
+    not mutated; a new list is returned.
     """
-    audio_records = [
-        record
+    has_audio = any(
+        record.kind in _AUDIO_KINDS and record.id in local_audio_paths
         for record in records
-        if record.kind in _AUDIO_KINDS and record.id in local_audio_paths
-    ]
-    if not audio_records:
-        return
+    )
+    if not has_audio:
+        return list(records)
 
     transcriber = get_transcriber(config)
     cache = TranscriptCache(config.cache_dir)
 
-    for record in audio_records:
-        cached = cache.get(record.id)
-        if cached is not None:
-            record.transcript = cached
+    transcribed: list[MessageRecord] = []
+    for record in records:
+        if record.kind not in _AUDIO_KINDS or record.id not in local_audio_paths:
+            transcribed.append(record)
             continue
 
-        audio_path = local_audio_paths[record.id]
-        try:
-            result = transcriber.transcribe(audio_path, language=config.language)
-        except Exception as exc:  # noqa: BLE001 - one bad audio must not abort the pull.
-            warnings.append(f"transcription failed for message {record.id}: {exc}")
-            continue
+        transcript = _transcript_for(
+            record,
+            transcriber=transcriber,
+            cache=cache,
+            audio_path=local_audio_paths[record.id],
+            language=config.language,
+            warnings=warnings,
+        )
+        if transcript is None:
+            transcribed.append(record)
+        else:
+            transcribed.append(record.model_copy(update={"transcript": transcript}))
+    return transcribed
 
-        cache.set(record.id, result)
-        record.transcript = result.text
+
+def _transcript_for(
+    record: MessageRecord,
+    *,
+    transcriber: Transcriber,
+    cache: TranscriptCache,
+    audio_path: Path,
+    language: str,
+    warnings: list[str],
+) -> str | None:
+    """Return the transcript text for one audio record, or None on failure.
+
+    A cache hit short-circuits the model; otherwise the audio is transcribed and
+    the result is cached. A single transcription failure adds a warning and
+    returns None so the caller can leave the record untranscribed.
+    """
+    cached = cache.get(record.id)
+    if cached is not None:
+        return cached
+
+    try:
+        result = transcriber.transcribe(audio_path, language=language)
+    except Exception as exc:  # noqa: BLE001 - one bad audio must not abort the pull.
+        warnings.append(f"transcription failed for message {record.id}: {exc}")
+        return None
+
+    cache.set(record.id, result)
+    return result.text
 
 
 def _timestamp_range(

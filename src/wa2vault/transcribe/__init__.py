@@ -11,8 +11,9 @@ Concrete backends:
 
 - :class:`~wa2vault.transcribe.faster_whisper_backend.FasterWhisperTranscriber`
   -- the default CPU backend (faster-whisper / CTranslate2).
-- :class:`~wa2vault.transcribe.nemotron_backend.NemotronTranscriber`
-  -- an optional future CPU backend.
+
+The ``nemotron`` backend is a planned-but-unimplemented option: it is accepted
+by config validation, but :func:`get_transcriber` fails fast if it is selected.
 """
 
 from wa2vault.transcribe.base import (

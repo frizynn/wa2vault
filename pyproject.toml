@@ -16,6 +16,10 @@ dependencies = [
 [project.scripts]
 wa2vault = "wa2vault.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/frizynn/wa2vault"
+Repository = "https://github.com/frizynn/wa2vault"
+
 [build-system]
 requires = ["uv_build>=0.11.14,<0.12.0"]
 build-backend = "uv_build"
@@ -25,3 +29,12 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.16",
 ]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

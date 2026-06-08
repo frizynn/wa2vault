@@ -70,7 +70,10 @@ class MessageRecord(BaseModel):
         description="Stable message identifier as reported by wacli (WhatsApp message ID)."
     )
     chat_jid: str = Field(
-        description="JID of the chat this message belongs to (e.g. '123@s.whatsapp.net' or '...@g.us')."
+        description=(
+            "JID of the chat this message belongs to "
+            "(e.g. '123@s.whatsapp.net' or '...@g.us')."
+        )
     )
     chat_name: str | None = Field(
         default=None,
@@ -106,11 +109,16 @@ class MessageRecord(BaseModel):
     )
     media_mime: str | None = Field(
         default=None,
-        description="MIME type of the media (e.g. 'audio/ogg; codecs=opus', 'image/jpeg'), if known.",
+        description=(
+            "MIME type of the media (e.g. 'audio/ogg; codecs=opus', 'image/jpeg'), if known."
+        ),
     )
     transcript: str | None = Field(
         default=None,
-        description="Local ASR transcript of a voice note / audio. Populated by the transcription layer.",
+        description=(
+            "Local ASR transcript of a voice note / audio. "
+            "Populated by the transcription layer."
+        ),
     )
     reply_to_id: str | None = Field(
         default=None,

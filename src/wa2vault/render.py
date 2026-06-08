@@ -20,6 +20,9 @@ from pathlib import Path
 
 from wa2vault.models import MessageRecord
 
+# Spanish UI strings rendered into the note. They are centralized here and not
+# yet localized; switching the output language would mean translating this block.
+#
 # Concise placeholders for non-text / non-media message kinds. Voice notes
 # ("ptt"/"audio") and images are handled separately because they can carry a
 # transcript / embed.
@@ -34,6 +37,11 @@ _KIND_PLACEHOLDERS: dict[str, str] = {
 
 _IMAGE_UNAVAILABLE = "*(imagen no disponible)*"
 _AUDIO_UNTRANSCRIBED = "*(audio sin transcribir)*"
+#: Sender label for messages sent by the linked account (Spanish: "Me").
+_SELF_SENDER_LABEL = "Yo"
+#: Fallback sender label when neither a name nor a JID is known.
+_UNKNOWN_SENDER_LABEL = "?"
+
 _REPLY_MARKER = "↳ "
 _FALLBACK_SLUG = "chat"
 
@@ -130,7 +138,7 @@ def write_note(
     target_dir = vault_dir / output_subdir
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    note_path = target_dir / f"{_slugify(chat_name)}.md"
+    note_path = target_dir / f"{slugify(chat_name)}.md"
     note_path.write_text(markdown, encoding="utf-8")
     return note_path
 
@@ -268,12 +276,12 @@ def _render_audio(record: MessageRecord) -> str:
 def _sender_label(record: MessageRecord) -> str:
     """Resolve the display label for a message's sender."""
     if record.from_me:
-        return "Yo"
+        return _SELF_SENDER_LABEL
     if record.sender_name:
         return record.sender_name
     if record.sender_jid:
         return record.sender_jid
-    return "?"
+    return _UNKNOWN_SENDER_LABEL
 
 
 def _date_range(records: list[MessageRecord]) -> tuple[str, str] | None:
@@ -312,7 +320,7 @@ def _yaml_scalar(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _slugify(name: str) -> str:
+def slugify(name: str) -> str:
     """Derive a filesystem-safe, readable slug from a chat name.
 
     Unicode is transliterated to ASCII where possible, path separators and
@@ -327,4 +335,4 @@ def _slugify(name: str) -> str:
     return ascii_name or _FALLBACK_SLUG
 
 
-__all__ = ["render_markdown", "write_note"]
+__all__ = ["render_markdown", "slugify", "write_note"]

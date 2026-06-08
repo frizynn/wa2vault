@@ -83,6 +83,8 @@ def get_transcriber(config: Config) -> Transcriber:
         A concrete :class:`Transcriber` instance.
 
     Raises:
+        NotImplementedError: If ``config.asr_backend`` is a recognized but
+            not-yet-implemented backend (``nemotron``).
         ValueError: If ``config.asr_backend`` is not a known backend.
     """
     backend = config.asr_backend
@@ -96,11 +98,8 @@ def get_transcriber(config: Config) -> Transcriber:
             language=config.language,
         )
     if backend == "nemotron":
-        from wa2vault.transcribe.nemotron_backend import NemotronTranscriber
-
-        return NemotronTranscriber(
-            model=config.asr_model,
-            language=config.language,
+        raise NotImplementedError(
+            "The 'nemotron' ASR backend is not implemented yet; use 'faster-whisper'."
         )
     raise ValueError(f"Unknown ASR backend: {backend!r}")
 

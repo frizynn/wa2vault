@@ -13,6 +13,11 @@ The tool is strictly READ-ONLY with respect to WhatsApp: it never sends
 messages. All wacli invocations run with the read-only guard enabled.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("wa2vault")
+except PackageNotFoundError:  # Package not installed (e.g. running from a source tree).
+    __version__ = "0.0.0"
 
 __all__ = ["__version__"]
