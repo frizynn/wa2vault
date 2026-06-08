@@ -127,12 +127,16 @@ def pull_chat(
     warnings: list[str] = []
     client = WacliClient(config)
 
-    # 1. Sync (best-effort): a sync failure must not abort the pull; we proceed
-    # with whatever is already in the local store.
+    # 1. Sync (best-effort): a sync failure OR a sync that exceeds
+    # ``config.sync_timeout`` must not abort the pull; we proceed with whatever
+    # is already in the local store. The timeout matters because ``sync --once``
+    # only returns once the stream goes idle, which can take minutes on a stale
+    # store with a large backlog -- without a bound the whole pull would hang
+    # here and never reach export/transcribe/render.
     try:
-        client.sync_once()
+        client.sync_once(timeout=config.sync_timeout)
     except WacliError as exc:
-        warnings.append(f"sync failed, using local store as-is: {exc}")
+        warnings.append(f"sync incomplete, using local store as-is: {exc}")
 
     # 2. Resolve the chat. A local contact-book name takes precedence so the
     # note title/filename use the friendly name even when WhatsApp never synced

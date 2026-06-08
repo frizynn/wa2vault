@@ -17,7 +17,7 @@ import pytest
 from wa2vault import pipeline
 from wa2vault.config import Config
 from wa2vault.models import MessageRecord
-from wa2vault.wacli import ChatRef
+from wa2vault.wacli import ChatRef, WacliError
 
 
 class FakeWacliClient:
@@ -39,14 +39,21 @@ class FakeWacliClient:
         self._records = records
         self._media_files = media_files
         self.sync_calls = 0
+        self.sync_timeout: float | None = None
+        self.sync_error: Exception | None = None
 
     def __call__(self, config: Config) -> "FakeWacliClient":
         # ``pipeline.WacliClient(config)`` is monkeypatched to this instance;
         # being callable lets it act as the constructor too.
         return self
 
-    def sync_once(self, *, full: bool = False) -> dict[str, object]:
+    def sync_once(
+        self, *, full: bool = False, timeout: float | None = None
+    ) -> dict[str, object]:
         self.sync_calls += 1
+        self.sync_timeout = timeout
+        if self.sync_error is not None:
+            raise self.sync_error
         return {"ok": True}
 
     def resolve_chat(self, query: str) -> ChatRef:
@@ -201,6 +208,51 @@ def test_pull_chat_writes_note_and_copies_image(
     assert "Wrote 4 messages" in rendered
     assert "1 images" in rendered
     assert "'Family'" in rendered
+
+
+def test_pull_chat_passes_configured_sync_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_setup: tuple[Config, ChatRef, list[MessageRecord], dict[str, Path]],
+) -> None:
+    """The pull forwards ``config.sync_timeout`` to the bounded sync."""
+    config, chatref, records, media_files = fake_setup
+    config = config.model_copy(update={"sync_timeout": 42.0})
+    fake = _install_fake_client(
+        monkeypatch, chatref=chatref, records=records, media_files=media_files
+    )
+
+    pipeline.pull_chat(config=config, chat="Family", days=30, transcribe=False)
+
+    assert fake.sync_timeout == 42.0
+
+
+def test_pull_chat_proceeds_when_sync_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_setup: tuple[Config, ChatRef, list[MessageRecord], dict[str, Path]],
+) -> None:
+    """A sync that times out (or otherwise fails) never aborts the pull.
+
+    This is the whole point of the bounded sync: a slow/stale-store sync must
+    degrade to "use the local store as-is" so export/render still run and the
+    note is written, with the failure recorded only as a warning.
+    """
+    config, chatref, records, media_files = fake_setup
+    fake = _install_fake_client(
+        monkeypatch, chatref=chatref, records=records, media_files=media_files
+    )
+    fake.sync_error = WacliError("wacli sync --once timed out after 90s")
+
+    result = pipeline.pull_chat(
+        config=config, chat="Family", days=30, transcribe=False, download_media=True
+    )
+
+    # The note was still written from the local store.
+    assert result.note_path.exists()
+    assert result.message_count == 4
+    # The timeout surfaced as a single best-effort warning, not an exception.
+    assert len(result.warnings) == 1
+    assert "timed out" in result.warnings[0]
+    assert "local store as-is" in result.warnings[0]
 
 
 def test_pull_chat_without_media_renders_image_unavailable(
