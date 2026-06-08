@@ -244,12 +244,10 @@ def pull(
 ) -> None:
     """Pull the last N days of a chat and write a Markdown note into the vault.
 
-    PHASE-2: the pipeline is not yet implemented. Intended flow:
-
-      sync -> export the last N days of the chat from wacli -> download/locate
-      media -> transcribe voice notes (ptt/audio) via the configured ASR
-      backend, using a per-message transcript cache -> render a Markdown note
-      into ``vault_dir/output_subdir``.
+    Flow: sync the local store -> export the last N days of the chat from wacli
+    -> download/locate media -> transcribe voice notes (ptt/audio) via the
+    configured ASR backend, using a per-message transcript cache -> render a
+    Markdown note into ``vault_dir/output_subdir``.
 
     Use ``--no-transcribe`` to skip ASR and ``--no-media`` to skip media.
     """
@@ -257,15 +255,26 @@ def pull(
     window_days = days if days is not None else config.default_days
 
     from wa2vault import pipeline
+    from wa2vault.wacli import ChatNotFound, ChatNotUnique
 
-    result = pipeline.pull_chat(
-        config=config,
-        chat=chat,
-        days=window_days,
-        transcribe=transcribe,
-        download_media=media,
-    )
-    typer.echo(str(result))
+    try:
+        result = pipeline.pull_chat(
+            config=config,
+            chat=chat,
+            days=window_days,
+            transcribe=transcribe,
+            download_media=media,
+        )
+    except (ChatNotFound, ChatNotUnique) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    except WacliError as exc:
+        typer.secho(f"wacli error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.secho(str(result), fg=typer.colors.GREEN)
+    for warning in result.warnings:
+        typer.secho(f"warning: {warning}", fg=typer.colors.YELLOW, err=True)
 
 
 @app.command()

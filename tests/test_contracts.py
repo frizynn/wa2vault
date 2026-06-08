@@ -1,8 +1,8 @@
-"""Smoke tests for the wa2vault Phase-1 contracts.
+"""Smoke tests for the wa2vault shared contracts.
 
 These tests pin the shape of the shared contracts (models, config, transcriber
-factory) that Phase-2 modules code against. They intentionally do not exercise
-the Phase-2 stubs beyond asserting that they raise ``NotImplementedError``.
+factory) that the rest of wa2vault codes against, and assert which backends are
+implemented versus intentionally deferred (the Nemotron backend).
 """
 
 from __future__ import annotations
@@ -15,7 +15,9 @@ import pytest
 from wa2vault.config import Config
 from wa2vault.models import MessageRecord
 from wa2vault.transcribe import get_transcriber
-from wa2vault.transcribe.base import TranscriptResult
+from wa2vault.transcribe.base import Transcriber, TranscriptResult
+from wa2vault.transcribe.faster_whisper_backend import FasterWhisperTranscriber
+from wa2vault.transcribe.nemotron_backend import NemotronTranscriber
 
 
 def test_message_record_minimal() -> None:
@@ -64,9 +66,24 @@ def test_get_transcriber_selects_faster_whisper() -> None:
     assert transcriber.name == "faster-whisper"
 
 
-def test_faster_whisper_transcribe_is_phase2_stub(tmp_path: Path) -> None:
+def test_faster_whisper_is_concrete_transcriber() -> None:
     config = Config()
     transcriber = get_transcriber(config)
+    assert isinstance(transcriber, FasterWhisperTranscriber)
+    assert isinstance(transcriber, Transcriber)
+    assert transcriber.name == "faster-whisper"
+
+
+def test_faster_whisper_transcribe_missing_file_raises(tmp_path: Path) -> None:
+    transcriber = get_transcriber(Config())
+    with pytest.raises(FileNotFoundError):
+        transcriber.transcribe(tmp_path / "does-not-exist.ogg")
+
+
+def test_nemotron_backend_is_future_stub(tmp_path: Path) -> None:
+    config = Config(asr_backend="nemotron")
+    transcriber = get_transcriber(config)
+    assert isinstance(transcriber, NemotronTranscriber)
     audio = tmp_path / "note.ogg"
     audio.write_bytes(b"")
     with pytest.raises(NotImplementedError):
