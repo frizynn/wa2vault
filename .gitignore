@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual environments / uv
+.venv/
+venv/
+env/
+.python-version.local
+
+# wa2vault runtime state, caches, work dirs
+.wa2vault/
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+
+# Audio / media artifacts pulled or transcoded locally
+media/
+audio/
+*.opus
+*.ogg
+*.oga
+*.m4a
+*.mp3
+*.wav
+
+# ASR / model caches
+models/
+.cache/
+*.bin
+*.ct2
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

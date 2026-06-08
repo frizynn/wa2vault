@@ -1,0 +1,27 @@
+[project]
+name = "wa2vault"
+version = "0.1.0"
+description = "Read-only WhatsApp chat exporter that transcribes voice notes locally and renders Markdown into an Obsidian vault."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Juan Francisco Lebrero" }]
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "platformdirs>=4.10.0",
+    "pydantic>=2.13.4",
+    "typer>=0.26.7",
+]
+
+[project.scripts]
+wa2vault = "wa2vault.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.16",
+]
