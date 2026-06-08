@@ -5,10 +5,13 @@ wa2vault never talks to WhatsApp directly; it shells out to ``wacli``
 local SQLite store and exposes JSON output on every command.
 
 This module centralizes process invocation so the rest of wa2vault deals with
-parsed JSON, not subprocess plumbing. Every invocation runs with wacli's
-read-only guard enabled (``WACLI_READONLY=1``), enforcing wa2vault's
-never-send posture: wacli will reject any command that would write to WhatsApp
-or mutate the local store.
+parsed JSON, not subprocess plumbing. Read/query commands run with wacli's
+read-only guard (``--read-only`` / ``WACLI_READONLY=1``) as defense-in-depth.
+That guard rejects ANY command that writes WhatsApp *or the local store*, so
+``sync_once`` -- which must mirror messages into the local store -- runs with
+the guard OFF. wa2vault's never-send guarantee does not depend on the guard:
+this client exposes no send/presence command (only sync, read, and media
+download), so it cannot message anyone.
 
 wacli store location
 --------------------
@@ -27,13 +30,14 @@ and the ``openclaw/wacli`` Go source (``internal/store/types.go`` for the JSON
 shapes), because the machine is not paired yet (no live data). All assumptions
 are coded defensively and should be re-validated after pairing.
 
-Commands and flags used (each appended after ``--read-only --json [--store …]``):
+Commands and flags used (read commands run after ``--read-only --json
+[--store …]``; ``sync`` omits ``--read-only``):
 
 * ``sync --once`` -- one-shot sync: keeps syncing until idle (~30s) and exits.
   ``--follow`` defaults to true, so ``--once`` is required to make it terminate.
-  wacli's ``--read-only`` guard permits ``sync`` (it only blocks WhatsApp
-  writes / message mutations, not store mirroring). Returns an
-  implementation-defined summary object; counts are surfaced when present.
+  Run WITHOUT the read-only guard: ``sync`` writes mirrored messages into the
+  local store, which ``--read-only`` rejects. Returns an implementation-defined
+  summary object; counts are surfaced when present.
 * ``chats list --limit N`` -- ``data`` is a JSON array of chat objects (or
   ``null`` when empty). Backs :meth:`list_chats` / :meth:`resolve_chat`.
 * ``messages export --chat JID [--after T] [--before T] [--limit N]`` -- ``data``
@@ -164,17 +168,27 @@ class WacliClient:
     # ------------------------------------------------------------------ #
     # Process plumbing
     # ------------------------------------------------------------------ #
-    def _base_args(self) -> list[str]:
-        """Build the leading argv shared by every invocation (binary + globals)."""
-        args = [self.config.wacli_bin, "--read-only", "--json"]
+    def _base_args(self, *, read_only: bool = True) -> list[str]:
+        """Build the leading argv shared by every invocation (binary + globals).
+
+        ``read_only`` adds wacli's ``--read-only`` guard. It must be False for
+        commands that legitimately write the local store (e.g. ``sync``), which
+        the guard would otherwise reject.
+        """
+        args = [self.config.wacli_bin, "--json"]
+        if read_only:
+            args.append("--read-only")
         if self.config.wacli_db is not None:
             args += ["--store", str(self.config.wacli_db)]
         return args
 
-    def _env(self) -> dict[str, str]:
-        """Environment for wacli, forcing the read-only guard on."""
+    def _env(self, *, read_only: bool = True) -> dict[str, str]:
+        """Environment for wacli; enables the read-only guard unless ``read_only`` is False."""
         env = dict(os.environ)
-        env["WACLI_READONLY"] = "1"
+        if read_only:
+            env["WACLI_READONLY"] = "1"
+        else:
+            env.pop("WACLI_READONLY", None)
         return env
 
     def ensure_available(self) -> None:
@@ -187,7 +201,9 @@ class WacliClient:
                 "Install it (see the wa2vault README) or set 'wacli_bin' in the config."
             )
 
-    def run_json(self, *args: str, timeout: float | None = None) -> Any:
+    def run_json(
+        self, *args: str, read_only: bool = True, timeout: float | None = None
+    ) -> Any:
         """Run a wacli subcommand and return its parsed JSON payload.
 
         wacli wraps successful JSON output as
@@ -198,19 +214,21 @@ class WacliClient:
         Args:
             *args: Subcommand and flags to append after the base argv, e.g.
                 ``"chats", "list", "--limit", "500"``.
+            read_only: Run under wacli's read-only guard (default). Pass False
+                for commands that must write the local store (e.g. ``sync``).
             timeout: Optional timeout in seconds.
 
         Returns:
             The decoded ``data`` field of the wacli JSON envelope.
         """
         self.ensure_available()
-        argv = self._base_args() + list(args)
+        argv = self._base_args(read_only=read_only) + list(args)
         try:
             proc = subprocess.run(
                 argv,
                 capture_output=True,
                 text=True,
-                env=self._env(),
+                env=self._env(read_only=read_only),
                 timeout=timeout,
                 check=False,
             )
@@ -282,7 +300,9 @@ class WacliClient:
         args = ["sync", "--once"]
         if full:
             args.append("--download-media")
-        data = self.run_json(*args)
+        # sync writes mirrored messages into the local store, so the read-only
+        # guard must be off (it rejects any local-store write).
+        data = self.run_json(*args, read_only=False)
         return self._summarize_sync(data)
 
     @staticmethod

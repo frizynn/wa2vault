@@ -14,8 +14,10 @@ delegates WhatsApp data access to ``wacli`` via
 :class:`~wa2vault.wacli.WacliClient`, and calls into the Phase-2 pipeline in
 :mod:`wa2vault.pipeline` for the data-heavy work.
 
-wa2vault is strictly READ-ONLY: it never sends WhatsApp messages. Every wacli
-invocation runs with the read-only guard enabled.
+wa2vault never sends WhatsApp messages. Read/query wacli commands run with the
+read-only guard (``WACLI_READONLY``); ``auth`` and ``sync`` run with it off,
+because they must write the local store (pair the device / mirror messages).
+The never-send guarantee holds regardless: wa2vault never invokes ``wacli send``.
 """
 
 from __future__ import annotations
@@ -84,17 +86,23 @@ def _config(ctx: typer.Context) -> Config:
     return ctx.obj[_CONFIG_OBJ_KEY]
 
 
-def _run_wacli_passthrough(config: Config, args: list[str]) -> int:
+def _run_wacli_passthrough(
+    config: Config, args: list[str], *, read_only: bool = True
+) -> int:
     """Run a wacli subcommand attached to the user's terminal (no capture).
 
     Used by ``auth`` and ``sync`` where wacli renders a QR code or streams sync
-    progress directly to the terminal. The read-only guard is enforced via the
-    ``WACLI_READONLY`` environment variable.
+    progress directly to the terminal. ``read_only`` toggles wacli's read-only
+    guard (``WACLI_READONLY``); it must be False for ``auth``/``sync``, which
+    write the local store (pairing keys / mirrored messages).
 
     Returns the wacli process exit code.
     """
     env = dict(os.environ)
-    env["WACLI_READONLY"] = "1"
+    if read_only:
+        env["WACLI_READONLY"] = "1"
+    else:
+        env.pop("WACLI_READONLY", None)
     argv = [config.wacli_bin]
     if config.wacli_db is not None:
         argv += ["--store", str(config.wacli_db)]
@@ -124,7 +132,7 @@ def auth(ctx: typer.Context) -> None:
         "Starting wacli pairing. Scan the QR with your phone "
         "(WhatsApp -> Settings -> Linked Devices)."
     )
-    code = _run_wacli_passthrough(config, ["auth"])
+    code = _run_wacli_passthrough(config, ["auth"], read_only=False)
     raise typer.Exit(code=code)
 
 
@@ -146,10 +154,11 @@ def sync(
     see how far back your local archive reaches.
     """
     config = _config(ctx)
-    code = _run_wacli_passthrough(config, ["sync", "--once"])
+    code = _run_wacli_passthrough(config, ["sync", "--once"], read_only=False)
     if code != 0:
         raise typer.Exit(code=code)
     if history:
+        # `history coverage` is a pure read, so the read-only guard stays on.
         _run_wacli_passthrough(config, ["history", "coverage"])
     raise typer.Exit(code=0)
 
