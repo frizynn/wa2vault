@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from wa2vault import wacli as wacli_module
 from wa2vault.config import Config
 from wa2vault.models import MessageRecord
 from wa2vault.wacli import (
@@ -408,6 +409,13 @@ def test_sync_once_forwards_timeout(monkeypatch) -> None:
 def test_run_json_timeout_raises_wacli_error(monkeypatch) -> None:
     """A subprocess timeout becomes a WacliError naming the bound."""
     client = _client()
+
+    # ``run_json`` first calls ``ensure_available`` (``shutil.which`` +
+    # ``os.path.exists``). Neutralize that check so the test exercises the
+    # timeout path regardless of whether ``wacli`` is installed (it is not on
+    # CI). Pointing ``which`` at a path short-circuits the ``and`` in
+    # ``ensure_available``, so ``os.path.exists`` is never consulted.
+    monkeypatch.setattr(wacli_module.shutil, "which", lambda _name: "/usr/bin/wacli")
 
     def boom(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="wacli sync --once", timeout=90)
