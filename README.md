@@ -199,6 +199,20 @@ Any key can be overridden at runtime with a `WA2VAULT_*` environment variable
 - **nemotron** (optional, future): planned support for a lightweight CPU ASR
   backend. **Not implemented yet.**
 
+## Claude Code / Codex skill
+
+This repo ships an agent skill so coding agents can archive a chat on request
+(e.g. *"bring me the last 30 days of my chat with X"*). It is a thin wrapper
+around the `wa2vault` CLI and is **read-only** — it never sends messages.
+
+- Location: [`skills/whatsapp-archive/SKILL.md`](skills/whatsapp-archive/SKILL.md)
+- Install (Claude Code): copy the folder into your skills directory —
+  `cp -r skills/whatsapp-archive ~/.claude/skills/`
+- Install (Codex): `cp -r skills/whatsapp-archive ~/.agents/skills/`
+
+The skill body is written in Spanish (Rioplatense); the commands it drives are
+the same documented above.
+
 ## Caveats
 
 **History is bounded.** A linked device only receives what your phone pushes.
