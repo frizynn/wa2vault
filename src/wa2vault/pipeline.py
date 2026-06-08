@@ -38,18 +38,26 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import re
+
 from wa2vault.config import Config
+from wa2vault.contacts import ContactBook
 from wa2vault.models import MessageRecord
 from wa2vault.render import _slugify, render_markdown, write_note
 from wa2vault.transcribe import get_transcriber
 from wa2vault.transcribe.cache import TranscriptCache
-from wa2vault.wacli import WacliClient, WacliError
+from wa2vault.wacli import ChatNotFound, ChatRef, WacliClient, WacliError
 
 #: Subdirectory (under ``output_subdir``) where copied attachments are stored.
 _MEDIA_SUBDIR = "_media"
 
 #: Message kinds that carry a transcribable voice note.
 _AUDIO_KINDS = frozenset({"ptt", "audio"})
+
+#: A sender name that is really just a phone number / bare JID (digits, an
+#: optional leading "+", spaces/dashes, optionally followed by an "@server"
+#: suffix). Such names are replaced by the resolved contact name for DM chats.
+_BARE_NUMBER_RE = re.compile(r"^\+?[\d\s\-()]+(@\S+)?$")
 
 
 @dataclass(frozen=True)
@@ -126,14 +134,20 @@ def pull_chat(
     except WacliError as exc:
         warnings.append(f"sync failed, using local store as-is: {exc}")
 
-    # 2. Resolve the chat (ChatNotFound / ChatNotUnique propagate to the caller).
-    chatref = client.resolve_chat(chat)
+    # 2. Resolve the chat. A local contact-book name takes precedence so the
+    # note title/filename use the friendly name even when WhatsApp never synced
+    # the contact. ChatNotFound / ChatNotUnique propagate to the caller.
+    chatref = _resolve_chat(client, chat, config)
     chat_name = chatref.name or chatref.jid
     chat_slug = _slugify(chat_name)
 
     # 3. Export the requested time window.
     since = datetime.now(timezone.utc) - timedelta(days=days)
     records = client.export_messages(chatref.jid, since=since)
+
+    # 3b. For DM chats, backfill missing/number-only sender names with the
+    # resolved chat name so the rendered timeline shows the person, not a number.
+    _fill_dm_sender_names(records, chatref)
 
     # 4. Media: materialize local files; copy images into the vault (relative
     # path), keep the local audio path for transcription. When media is
@@ -199,6 +213,61 @@ def pull_chat(
         range_end=range_end,
         warnings=warnings,
     )
+
+
+def _resolve_chat(client: WacliClient, chat: str, config: Config) -> ChatRef:
+    """Resolve ``chat`` to a :class:`ChatRef`, honoring the local contact book.
+
+    If ``chat`` matches a saved contact name (or a saved number/JID), that JID is
+    resolved against wacli to confirm the chat exists and learn its type, and the
+    resulting :class:`ChatRef` carries the saved friendly name. Otherwise
+    resolution falls back to wacli's own name/JID/substring matching.
+
+    Raises:
+        wa2vault.wacli.ChatNotFound: The matched contact has no synced chat yet,
+            or no chat matched at all.
+        wa2vault.wacli.ChatNotUnique: ``chat`` matched more than one wacli chat.
+    """
+    book = ContactBook(config.contacts_file)
+    mapped = book.find(chat)
+    if mapped is None:
+        return client.resolve_chat(chat)
+
+    try:
+        resolved = client.resolve_chat(mapped)
+    except ChatNotFound as exc:
+        raise ChatNotFound(
+            f"Contact {chat!r} ({mapped}) has no chat/messages synced yet. "
+            "Run `wa2vault sync` (or chat with them once) and try again."
+        ) from exc
+
+    name = book.name_for(mapped) or resolved.name
+    return ChatRef(jid=resolved.jid, name=name, chat_type=resolved.chat_type)
+
+
+def _fill_dm_sender_names(records: list[MessageRecord], chatref: ChatRef) -> None:
+    """Backfill DM sender names that are missing or look like a bare number.
+
+    Only DM chats are touched (groups already carry real per-sender names). For
+    each incoming message (``from_me is False``) whose ``sender_name`` is missing
+    or looks like a phone number / bare JID, set it to the resolved chat name so
+    the rendered timeline shows the person instead of digits.
+    """
+    if chatref.chat_type != "dm" or not chatref.name:
+        return
+
+    for record in records:
+        if record.from_me:
+            continue
+        if _is_missing_or_number(record.sender_name):
+            record.sender_name = chatref.name
+
+
+def _is_missing_or_number(sender_name: str | None) -> bool:
+    """Return True if ``sender_name`` is absent or just a phone/JID, not a name."""
+    if not sender_name:
+        return True
+    return bool(_BARE_NUMBER_RE.match(sender_name.strip()))
 
 
 def _resolve_media(
