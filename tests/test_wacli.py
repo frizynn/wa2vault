@@ -13,6 +13,7 @@ keys, update both the fixtures and the parser.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -383,6 +384,37 @@ def test_sync_once_non_dict_payload(monkeypatch) -> None:
     client = _client()
     monkeypatch.setattr(client, "run_json", lambda *a, **k: None)
     assert client.sync_once() == {"ok": True}
+
+
+def test_sync_once_forwards_timeout(monkeypatch) -> None:
+    """``sync_once(timeout=...)`` threads the bound into the wacli invocation."""
+    captured: dict[str, object] = {}
+
+    def fake_run_json(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"ok": True}
+
+    client = _client()
+    monkeypatch.setattr(client, "run_json", fake_run_json)
+    client.sync_once(timeout=12.5)
+
+    assert captured["args"] == ("sync", "--once")
+    assert captured["kwargs"]["timeout"] == 12.5
+    # sync must run with the read-only guard OFF (it writes the local store).
+    assert captured["kwargs"]["read_only"] is False
+
+
+def test_run_json_timeout_raises_wacli_error(monkeypatch) -> None:
+    """A subprocess timeout becomes a WacliError naming the bound."""
+    client = _client()
+
+    def boom(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="wacli sync --once", timeout=90)
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(WacliError, match="timed out after 90s"):
+        client.run_json("sync", "--once", read_only=False, timeout=90)
 
 
 # --------------------------------------------------------------------------- #

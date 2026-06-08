@@ -105,6 +105,15 @@ class Config(BaseModel):
         ge=1,
         description="Default number of days of history to pull when --days is omitted.",
     )
+    sync_timeout: float | None = Field(
+        default=90.0,
+        description=(
+            "Max seconds to wait for the best-effort store sync at the start of a "
+            "pull. If the sync exceeds this (e.g. a large backlog on a stale "
+            "store), it is stopped and the pull proceeds with whatever is already "
+            "in the local store. Empty/None waits indefinitely (legacy behavior)."
+        ),
+    )
     cache_dir: Path = Field(
         default_factory=default_cache_dir,
         description="Directory for the transcript cache and scratch/work files.",
@@ -125,6 +134,19 @@ class Config(BaseModel):
         The default TOML file serializes ``wacli_db = None`` as an empty string
         (TOML has no null literal); on load that empty string must round-trip
         back to None rather than becoming ``Path("")``.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("sync_timeout", mode="before")
+    @classmethod
+    def _blank_timeout_is_none(cls, value: object) -> object:
+        """Treat an empty/whitespace ``sync_timeout`` as None (wait indefinitely).
+
+        The default TOML file serializes ``sync_timeout = None`` as an empty
+        string (TOML has no null literal); on load that must round-trip back to
+        None rather than failing float validation.
         """
         if isinstance(value, str) and not value.strip():
             return None
@@ -187,6 +209,13 @@ class Config(BaseModel):
         if days:
             overrides["default_days"] = int(days)
 
+        sync_timeout = os.environ.get("WA2VAULT_SYNC_TIMEOUT")
+        if sync_timeout is not None:
+            stripped = sync_timeout.strip()
+            overrides["sync_timeout"] = (
+                None if not stripped or stripped.lower() == "none" else float(stripped)
+            )
+
         if not overrides:
             return self
         return self.model_copy(update=overrides)
@@ -229,6 +258,10 @@ class Config(BaseModel):
             ("asr_model", _toml_str(self.asr_model)),
             ("language", _toml_str(self.language)),
             ("default_days", str(self.default_days)),
+            (
+                "sync_timeout",
+                str(self.sync_timeout) if self.sync_timeout is not None else '""',
+            ),
             ("cache_dir", _toml_str(str(self.cache_dir))),
             ("contacts_file", _toml_str(str(self.contacts_file))),
         ]

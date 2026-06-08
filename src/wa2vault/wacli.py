@@ -232,6 +232,10 @@ class WacliClient:
                 timeout=timeout,
                 check=False,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise WacliError(
+                f"wacli {' '.join(args)} timed out after {timeout:g}s"
+            ) from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise WacliError(f"Failed to run wacli: {exc}") from exc
 
@@ -280,16 +284,25 @@ class WacliClient:
             f"Unexpected 'chats list' payload shape: {type(data).__name__}"
         )
 
-    def sync_once(self, *, full: bool = False) -> dict[str, Any]:
+    def sync_once(
+        self, *, full: bool = False, timeout: float | None = None
+    ) -> dict[str, Any]:
         """Run a one-shot sync of the local store via ``wacli sync --once``.
 
         ``wacli sync`` follows the stream indefinitely by default; ``--once``
         makes it sync until idle and exit, which is what an archiver wants.
 
+        ``--once`` only exits once the stream goes idle, so on a stale store
+        with a large backlog it can run for minutes. ``timeout`` bounds that:
+        when it elapses, wacli is killed and a :class:`WacliError` is raised, so
+        a caller that treats sync as best-effort (e.g. :func:`pull_chat`) can
+        proceed with whatever already synced instead of hanging.
+
         Args:
             full: When True, also download media in the background during the
                 sync (``--download-media``). When False, only message metadata
                 is mirrored and media is fetched lazily by :meth:`ensure_media`.
+            timeout: Max seconds to wait for the sync. None waits indefinitely.
 
         Returns:
             A concise summary dict. wacli's exact ``sync`` payload is not pinned
@@ -302,7 +315,7 @@ class WacliClient:
             args.append("--download-media")
         # sync writes mirrored messages into the local store, so the read-only
         # guard must be off (it rejects any local-store write).
-        data = self.run_json(*args, read_only=False)
+        data = self.run_json(*args, read_only=False, timeout=timeout)
         return self._summarize_sync(data)
 
     @staticmethod
