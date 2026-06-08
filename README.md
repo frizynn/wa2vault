@@ -210,9 +210,6 @@ around the `wa2vault` CLI and is **read-only** — it never sends messages.
   `cp -r skills/whatsapp-archive ~/.claude/skills/`
 - Install (Codex): `cp -r skills/whatsapp-archive ~/.agents/skills/`
 
-The skill body is written in Spanish (Rioplatense); the commands it drives are
-the same documented above.
-
 ## Caveats
 
 **History is bounded.** A linked device only receives what your phone pushes.
