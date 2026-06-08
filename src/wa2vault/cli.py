@@ -139,6 +139,24 @@ def auth(ctx: typer.Context) -> None:
 @app.command()
 def sync(
     ctx: typer.Context,
+    idle: Annotated[
+        int,
+        typer.Option(
+            "--idle",
+            min=5,
+            help=(
+                "Seconds of inactivity before sync exits (wacli --idle-exit). "
+                "Raise it (e.g. --idle 180) to capture more history per run."
+            ),
+        ),
+    ] = 30,
+    media: Annotated[
+        bool,
+        typer.Option(
+            "--media/--no-media",
+            help="Also download media in the background while syncing.",
+        ),
+    ] = False,
     history: Annotated[
         bool,
         typer.Option(
@@ -149,12 +167,16 @@ def sync(
 ) -> None:
     """Refresh the local wacli store (incremental sync until idle).
 
-    Runs ``wacli sync --once`` to pull new messages and exit when idle. With
-    ``--history`` it additionally prints ``wacli history coverage`` so you can
-    see how far back your local archive reaches.
+    Runs ``wacli sync --once`` to pull new messages and exit after ``--idle``
+    seconds of inactivity. WhatsApp delivers history in batches, so run this a
+    few times (or raise ``--idle``) to accumulate more. ``--media`` downloads
+    media during the sync; ``--history`` prints how far back your archive reaches.
     """
     config = _config(ctx)
-    code = _run_wacli_passthrough(config, ["sync", "--once"], read_only=False)
+    args = ["sync", "--once", "--idle-exit", f"{idle}s"]
+    if media:
+        args.append("--download-media")
+    code = _run_wacli_passthrough(config, args, read_only=False)
     if code != 0:
         raise typer.Exit(code=code)
     if history:
