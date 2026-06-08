@@ -186,6 +186,13 @@ year) but **not zero**. Recommendation: link as a **secondary device** rather
 than your primary number, and avoid automated sending entirely (wa2vault never
 sends).
 
+## Project tracking
+
+Design decisions, research notes, and work-in-progress for this project live in
+the Obsidian vault **`wa2vault`** (`~/Obsidian/wa2vault/`), which also doubles as
+the default output target (`Chats/`). The repo and the vault deliberately share
+the name so tooling (and the SessionStart hook) can map one to the other.
+
 ## License
 
 MIT — Juan Francisco Lebrero. See [LICENSE](LICENSE).
