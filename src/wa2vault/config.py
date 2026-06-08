@@ -41,6 +41,14 @@ def default_config_path() -> Path:
     return Path(platformdirs.user_config_dir(APP_NAME, APP_AUTHOR)) / "config.toml"
 
 
+def default_contacts_file() -> Path:
+    """Return the path to the local contact-book JSON file.
+
+    Lives in the same directory as :func:`default_config_path`.
+    """
+    return Path(platformdirs.user_config_dir(APP_NAME, APP_AUTHOR)) / "contacts.json"
+
+
 def default_cache_dir() -> Path:
     """Return the default cache/work directory (transcripts + scratch)."""
     return Path(platformdirs.user_cache_dir(APP_NAME, APP_AUTHOR))
@@ -100,6 +108,13 @@ class Config(BaseModel):
     cache_dir: Path = Field(
         default_factory=default_cache_dir,
         description="Directory for the transcript cache and scratch/work files.",
+    )
+    contacts_file: Path = Field(
+        default_factory=default_contacts_file,
+        description=(
+            "JSON file mapping a chat JID to a local name, used to override "
+            "missing WhatsApp contact names for direct-message chats."
+        ),
     )
 
     @field_validator("wacli_db", mode="before")
@@ -161,6 +176,7 @@ class Config(BaseModel):
             "WA2VAULT_VAULT_DIR": "vault_dir",
             "WA2VAULT_WACLI_DB": "wacli_db",
             "WA2VAULT_CACHE_DIR": "cache_dir",
+            "WA2VAULT_CONTACTS_FILE": "contacts_file",
         }
         for env_key, field in env_path.items():
             value = os.environ.get(env_key)
@@ -214,6 +230,7 @@ class Config(BaseModel):
             ("language", _toml_str(self.language)),
             ("default_days", str(self.default_days)),
             ("cache_dir", _toml_str(str(self.cache_dir))),
+            ("contacts_file", _toml_str(str(self.contacts_file))),
         ]
         return items
 
@@ -228,6 +245,7 @@ __all__ = [
     "Config",
     "AsrBackend",
     "default_config_path",
+    "default_contacts_file",
     "default_cache_dir",
     "default_vault_dir",
 ]

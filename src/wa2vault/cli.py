@@ -31,6 +31,7 @@ import typer
 
 from wa2vault import __version__
 from wa2vault.config import Config
+from wa2vault.contacts import ContactBook, pretty_phone
 from wa2vault.wacli import WacliClient, WacliError
 
 app = typer.Typer(
@@ -47,6 +48,12 @@ app = typer.Typer(
 # Stored on the Typer context so commands can read the resolved config and the
 # optional --config path chosen by the user.
 _CONFIG_OBJ_KEY = "config"
+
+contact_app = typer.Typer(
+    help="Manage local contact names (when WhatsApp's contact names didn't sync).",
+    no_args_is_help=True,
+)
+app.add_typer(contact_app, name="contact")
 
 
 def _version_callback(value: bool) -> None:
@@ -210,10 +217,28 @@ def chats(
         typer.echo("No chats found. Run `wa2vault auth` then `wa2vault sync` first.")
         raise typer.Exit(code=0)
 
-    _print_chats_table(rows)
+    book = ContactBook(config.contacts_file)
+    _print_chats_table(rows, book)
 
 
-def _print_chats_table(rows: list[dict]) -> None:
+def _display_name(row: dict, jid: str, raw_name: str, book: ContactBook) -> str:
+    """Pick the best display name for a chat row.
+
+    For DM chats whose name is missing or just echoes the JID/phone, fall back
+    to a saved contact name, then to a readable phone. Groups and channels keep
+    their real names untouched.
+    """
+    if not jid.endswith("@s.whatsapp.net"):
+        return raw_name or "(unnamed)"
+
+    phone = pretty_phone(jid)
+    name_is_placeholder = not raw_name or raw_name in {jid, phone}
+    if name_is_placeholder:
+        return book.name_for(jid) or phone
+    return raw_name
+
+
+def _print_chats_table(rows: list[dict], book: ContactBook) -> None:
     """Print chats as an aligned NAME / TYPE / JID table."""
 
     def field(row: dict, *keys: str) -> str:
@@ -225,7 +250,12 @@ def _print_chats_table(rows: list[dict]) -> None:
 
     table = [
         (
-            field(row, "name", "display_name", "subject") or "(unnamed)",
+            _display_name(
+                row,
+                field(row, "jid", "chat_jid", "id"),
+                field(row, "name", "display_name", "subject"),
+                book,
+            ),
             field(row, "type", "chat_type") or "-",
             field(row, "jid", "chat_jid", "id"),
         )
@@ -349,6 +379,70 @@ def transcribe(
         )
         raise typer.Exit(code=1) from exc
     typer.echo(result.text)
+
+
+@contact_app.command("add")
+def contact_add(
+    ctx: typer.Context,
+    number: Annotated[
+        str,
+        typer.Argument(help="Phone number (any format) or full JID."),
+    ],
+    name: Annotated[
+        str,
+        typer.Argument(help="Friendly name to store for this contact."),
+    ],
+) -> None:
+    """Save a local name for a number/JID, so chats show it instead of digits."""
+    config = _config(ctx)
+    book = ContactBook(config.contacts_file)
+    try:
+        jid = book.set(number, name)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+    typer.secho(f'Saved "{name.strip()}" -> {pretty_phone(jid)}', fg=typer.colors.GREEN)
+
+
+@contact_app.command("list")
+def contact_list(ctx: typer.Context) -> None:
+    """List saved contacts as a NAME -> PHONE table."""
+    config = _config(ctx)
+    book = ContactBook(config.contacts_file)
+    entries = book.items()
+    if not entries:
+        typer.echo("No saved contacts yet.")
+        return
+
+    pairs = sorted(
+        ((name, pretty_phone(jid)) for jid, name in entries.items()),
+        key=lambda pair: pair[0].lower(),
+    )
+    name_w = max(len(name) for name, _ in pairs)
+    name_w = max(name_w, len("NAME"))
+
+    header = f"{'NAME':<{name_w}}  PHONE"
+    typer.secho(header, bold=True)
+    typer.echo("-" * len(header))
+    for name, phone in pairs:
+        typer.echo(f"{name:<{name_w}}  {phone}")
+
+
+@contact_app.command("rm")
+def contact_rm(
+    ctx: typer.Context,
+    query: Annotated[
+        str,
+        typer.Argument(help="Number, JID, or saved name to remove."),
+    ],
+) -> None:
+    """Remove a saved contact by number/JID or by exact name."""
+    config = _config(ctx)
+    book = ContactBook(config.contacts_file)
+    if book.remove(query):
+        typer.secho(f"Removed {query!r}.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"No saved contact matched {query!r}.", fg=typer.colors.YELLOW)
 
 
 __all__ = ["app"]
