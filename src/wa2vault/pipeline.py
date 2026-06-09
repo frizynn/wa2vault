@@ -41,6 +41,7 @@ from pathlib import Path
 
 from wa2vault.config import Config
 from wa2vault.contacts import ContactBook
+from wa2vault.lock import find_store_lock
 from wa2vault.models import MessageRecord
 from wa2vault.render import render_markdown, slugify, write_note
 from wa2vault.transcribe import Transcriber, get_transcriber
@@ -132,10 +133,23 @@ def pull_chat(
     # only returns once the stream goes idle, which can take minutes on a stale
     # store with a large backlog -- without a bound the whole pull would hang
     # here and never reach export/transcribe/render.
-    try:
-        client.sync_once(timeout=config.sync_timeout)
-    except WacliError as exc:
-        warnings.append(f"sync incomplete, using local store as-is: {exc}")
+    #
+    # If another wa2vault/wacli instance is already syncing, we do NOT start a
+    # second writer (wacli is single-writer; a second one just races for an
+    # exclusive lock it cannot get and fails late). Instead we skip the sync and
+    # export from the current local store -- reads are safe alongside the running
+    # writer -- recording the skip as a warning.
+    held = find_store_lock(config)
+    if held is not None:
+        warnings.append(
+            f"another wa2vault/wacli instance is syncing ({held.describe()}); "
+            "skipped the store sync and exported from the current local store"
+        )
+    else:
+        try:
+            client.sync_once(timeout=config.sync_timeout)
+        except WacliError as exc:
+            warnings.append(f"sync incomplete, using local store as-is: {exc}")
 
     # 2. Resolve the chat. A local contact-book name takes precedence so the
     # note title/filename use the friendly name even when WhatsApp never synced

@@ -16,6 +16,7 @@ import pytest
 
 from wa2vault import pipeline
 from wa2vault.config import Config
+from wa2vault.lock import StoreLock
 from wa2vault.models import MessageRecord
 from wa2vault.wacli import ChatRef, WacliError
 
@@ -156,6 +157,9 @@ def _install_fake_client(
 ) -> FakeWacliClient:
     fake = FakeWacliClient(chatref=chatref, records=records, media_files=media_files)
     monkeypatch.setattr(pipeline, "WacliClient", fake)
+    # Default to "no other writer running" so the pull performs its own sync;
+    # the lock-aware skip path is covered explicitly in its own test.
+    monkeypatch.setattr(pipeline, "find_store_lock", lambda config: None)
     return fake
 
 
@@ -253,6 +257,46 @@ def test_pull_chat_proceeds_when_sync_times_out(
     assert len(result.warnings) == 1
     assert "timed out" in result.warnings[0]
     assert "local store as-is" in result.warnings[0]
+
+
+def test_pull_chat_skips_sync_when_another_instance_holds_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_setup: tuple[Config, ChatRef, list[MessageRecord], dict[str, Path]],
+) -> None:
+    """When another writer holds the store lock, the pull skips its own sync.
+
+    wacli is single-writer, so starting a second sync would only race for a lock
+    it cannot get. The pull must instead skip the sync, export from the current
+    local store (reads are safe alongside the running writer), and record the
+    skip as a single warning -- never starting a competing wacli.
+    """
+    config, chatref, records, media_files = fake_setup
+    fake = _install_fake_client(
+        monkeypatch, chatref=chatref, records=records, media_files=media_files
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "find_store_lock",
+        lambda config: StoreLock(
+            pid=4242,
+            acquired_at="2026-06-09T12:50:12-03:00",
+            lock_file=Path("/tmp/wacli/LOCK"),
+        ),
+    )
+
+    result = pipeline.pull_chat(
+        config=config, chat="Family", days=30, transcribe=False, download_media=True
+    )
+
+    # No competing sync was started.
+    assert fake.sync_calls == 0
+    # The note was still written from the local store.
+    assert result.note_path.exists()
+    assert result.message_count == 4
+    # The skip surfaced as a single best-effort warning naming the holder.
+    assert len(result.warnings) == 1
+    assert "another wa2vault/wacli instance is syncing" in result.warnings[0]
+    assert "pid 4242" in result.warnings[0]
 
 
 def test_pull_chat_without_media_renders_image_unavailable(

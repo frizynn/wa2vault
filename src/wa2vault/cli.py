@@ -32,6 +32,7 @@ import typer
 from wa2vault import __version__
 from wa2vault.config import Config
 from wa2vault.contacts import ContactBook, pretty_phone
+from wa2vault.lock import find_store_lock
 from wa2vault.wacli import WacliClient, WacliError
 
 app = typer.Typer(
@@ -122,6 +123,33 @@ def _run_wacli_passthrough(
     return proc.returncode
 
 
+def _abort_if_store_locked(config: Config, *, action: str) -> None:
+    """Refuse to start a wacli writer if another instance already holds the lock.
+
+    wacli is a single writer: only one process may sync/pair against the store
+    at a time. Starting a second one just races for an exclusive lock it cannot
+    get. When another live instance is detected we stop here with a clear error
+    instead, so concurrent runs (e.g. two agents) back off cleanly rather than
+    thrashing on the lock. See :mod:`wa2vault.lock`.
+    """
+    held = find_store_lock(config)
+    if held is None:
+        return
+    typer.secho(
+        f"error: another wa2vault/wacli instance is already running ({held.describe()}).",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    typer.secho(
+        f"warning: wacli allows a single writer on the store, so this {action} "
+        "will not start (refusing to avoid a store-lock conflict). Wait for the "
+        "other run to finish or stop it, then retry.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command()
 def auth(ctx: typer.Context) -> None:
     """Pair your phone with wacli (QR), so wa2vault can read your chats.
@@ -131,6 +159,7 @@ def auth(ctx: typer.Context) -> None:
     pairing only lets it mirror and read your message history locally.
     """
     config = _config(ctx)
+    _abort_if_store_locked(config, action="pairing")
     typer.secho(
         "wa2vault is READ-ONLY: it never sends WhatsApp messages.",
         fg=typer.colors.GREEN,
@@ -180,6 +209,7 @@ def sync(
     media during the sync; ``--history`` prints how far back your archive reaches.
     """
     config = _config(ctx)
+    _abort_if_store_locked(config, action="sync")
     args = ["sync", "--once", "--idle-exit", f"{idle}s"]
     if media:
         args.append("--download-media")
