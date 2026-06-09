@@ -284,6 +284,74 @@ class WacliClient:
             f"Unexpected 'chats list' payload shape: {type(data).__name__}"
         )
 
+    def list_groups(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Return joined groups via ``wacli groups list --json``.
+
+        wacli keeps a dedicated group table whose ``Name`` is the group
+        *subject*. That subject is frequently present here even when
+        ``chats list`` reports the bare JID as the chat name -- e.g. right after
+        pairing, when WhatsApp's "app state" sync (where chat-level names live)
+        fails with an LTHash mismatch. :meth:`group_names` uses this to backfill
+        those missing names.
+
+        Group rows (``store.Group``) use PascalCase keys; the fields we read are
+        ``JID`` and ``Name`` (both accessed defensively).
+
+        Args:
+            limit: Maximum number of groups to return.
+
+        Returns:
+            A list of group dicts as emitted by wacli (shape passed through
+            verbatim). Empty when there are no groups.
+        """
+        data = self.run_json("groups", "list", "--limit", str(limit))
+        if data is None:
+            # wacli returns a null `data` field when there are no groups.
+            return []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("groups"), list):
+            return data["groups"]
+        raise WacliError(
+            f"Unexpected 'groups list' payload shape: {type(data).__name__}"
+        )
+
+    def group_names(self, limit: int = 500) -> dict[str, str]:
+        """Map group JID -> subject for groups that have a real (non-placeholder) name.
+
+        Built from :meth:`list_groups`. Groups whose name is missing or merely
+        echoes the JID are skipped, so callers can ``.get(jid)`` to backfill a
+        display name only when a real one exists.
+        """
+        mapping: dict[str, str] = {}
+        for raw in self.list_groups(limit=limit):
+            jid = _first_str(raw, "jid", "JID", "chat_jid", "ChatJID", "id")
+            name = _first_str(raw, "name", "Name", "subject", "Subject")
+            if jid and name and name != jid:
+                mapping[jid] = name
+        return mapping
+
+    def refresh_groups(self, *, timeout: float | None = None) -> dict[str, Any]:
+        """Fetch joined groups live and update the local store (``wacli groups refresh``).
+
+        Unlike :meth:`list_groups` (which reads the local DB), this queries
+        WhatsApp for the current set of joined groups and their subjects and
+        writes them into wacli's store. Use it when the local DB has no subject
+        for a group at all -- a freshly paired device whose app-state never
+        synced. Because it writes the local store, it runs with the read-only
+        guard OFF; it still only *reads* from WhatsApp, so wa2vault's
+        never-send guarantee is unaffected (this client exposes no send command).
+
+        Args:
+            timeout: Max seconds to wait for the refresh. None waits indefinitely.
+
+        Returns:
+            A concise summary dict (counts surfaced verbatim when wacli reports
+            them).
+        """
+        data = self.run_json("groups", "refresh", read_only=False, timeout=timeout)
+        return self._summarize_sync(data)
+
     def sync_once(
         self, *, full: bool = False, timeout: float | None = None
     ) -> dict[str, Any]:
@@ -360,6 +428,7 @@ class WacliClient:
 
         chats = [self._chat_ref(c) for c in self.list_chats()]
         chats = [c for c in chats if c is not None]
+        chats = self._backfill_group_names(chats)
 
         # 1. Exact JID match.
         jid_matches = [c for c in chats if c.jid.lower() == needle.lower()]
@@ -383,6 +452,32 @@ class WacliClient:
             raise ChatNotUnique(query, partial)
 
         raise ChatNotFound(f"No chat matches query {query!r}")
+
+    def _backfill_group_names(self, chats: list[ChatRef]) -> list[ChatRef]:
+        """Fill in group names missing from ``chats list`` using the group table.
+
+        A group :class:`ChatRef` whose name is absent or just echoes its JID gets
+        its real subject from :meth:`group_names`, when available. This lets a
+        user resolve a chat by its real group name even when WhatsApp's app-state
+        sync never delivered it to the chat list. Best-effort: if the group
+        lookup fails, the chats are returned unchanged.
+        """
+        if not any(_is_placeholder_group(c.jid, c.name) for c in chats):
+            return chats
+        try:
+            names = self.group_names()
+        except WacliError:
+            return chats
+        if not names:
+            return chats
+        patched: list[ChatRef] = []
+        for c in chats:
+            if _is_placeholder_group(c.jid, c.name):
+                real = names.get(c.jid)
+                if real:
+                    c = ChatRef(jid=c.jid, name=real, chat_type=c.chat_type)
+            patched.append(c)
+        return patched
 
     def export_messages(
         self,
@@ -647,6 +742,16 @@ def _parse_timestamp(value: Any) -> datetime | None:
             return None
         return _to_utc(parsed)
     return None
+
+
+def _is_placeholder_group(jid: str, name: str | None) -> bool:
+    """Return True for a group JID whose name is missing or merely echoes the JID.
+
+    wacli's ``chats list`` reports the bare JID as the name for groups whose
+    subject never synced (a WhatsApp app-state LTHash failure), so such a name
+    is not a real one and should be backfilled from the group table.
+    """
+    return jid.endswith("@g.us") and (not name or name == jid)
 
 
 def _chat_type_from_jid(jid: str) -> ChatType:

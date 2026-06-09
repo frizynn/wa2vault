@@ -362,6 +362,137 @@ def test_resolve_chat_empty_query_raises(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# groups: list_groups / group_names / refresh_groups
+# --------------------------------------------------------------------------- #
+def test_list_groups_passthrough_list(monkeypatch) -> None:
+    rows = [{"JID": "120363000000000000@g.us", "Name": "Mi Grupo"}]
+    client = _client()
+    monkeypatch.setattr(client, "run_json", lambda *a, **k: rows)
+    assert client.list_groups() == rows
+
+
+def test_list_groups_null_data_is_empty(monkeypatch) -> None:
+    client = _client()
+    monkeypatch.setattr(client, "run_json", lambda *a, **k: None)
+    assert client.list_groups() == []
+
+
+def test_list_groups_dict_with_groups_key(monkeypatch) -> None:
+    client = _client()
+    monkeypatch.setattr(
+        client, "run_json", lambda *a, **k: {"groups": [{"JID": "1@g.us"}]}
+    )
+    assert client.list_groups() == [{"JID": "1@g.us"}]
+
+
+def test_list_groups_bad_shape_raises(monkeypatch) -> None:
+    client = _client()
+    monkeypatch.setattr(client, "run_json", lambda *a, **k: 42)
+    with pytest.raises(WacliError, match="groups list"):
+        client.list_groups()
+
+
+def test_group_names_maps_jid_to_subject_and_skips_placeholders(monkeypatch) -> None:
+    groups = [
+        {"JID": "120363000000000000@g.us", "Name": "Mi Grupo"},
+        # Name echoes the JID (app-state sync never delivered a real subject).
+        {"JID": "120363111111111111@g.us", "Name": "120363111111111111@g.us"},
+        {"JID": "120363222222222222@g.us", "Name": ""},  # empty name
+        {"Name": "no jid"},  # unusable (no JID)
+    ]
+    client = _client()
+    monkeypatch.setattr(client, "list_groups", lambda *a, **k: groups)
+    assert client.group_names() == {"120363000000000000@g.us": "Mi Grupo"}
+
+
+def test_refresh_groups_runs_with_guard_off_and_summarizes(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_json(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"groups": 5, "store": {"groups": 5}}
+
+    client = _client()
+    monkeypatch.setattr(client, "run_json", fake_run_json)
+    summary = client.refresh_groups(timeout=7.5)
+
+    assert captured["args"] == ("groups", "refresh")
+    # refresh writes the local store, so the read-only guard must be OFF.
+    assert captured["kwargs"]["read_only"] is False
+    assert captured["kwargs"]["timeout"] == 7.5
+    assert summary["ok"] is True
+    assert summary["groups"] == 5
+    assert summary["store"] == {"groups": 5}
+
+
+def test_is_placeholder_group_detection() -> None:
+    assert wacli_module._is_placeholder_group("1@g.us", "1@g.us") is True
+    assert wacli_module._is_placeholder_group("1@g.us", None) is True
+    assert wacli_module._is_placeholder_group("1@g.us", "") is True
+    assert wacli_module._is_placeholder_group("1@g.us", "Real Name") is False
+    # Only groups (@g.us) are ever treated as placeholder here.
+    assert wacli_module._is_placeholder_group("1@s.whatsapp.net", "1@s.whatsapp.net") is False
+
+
+# --------------------------------------------------------------------------- #
+# resolve_chat: group-name backfill from the group table
+# --------------------------------------------------------------------------- #
+def test_resolve_chat_backfills_group_name(monkeypatch) -> None:
+    # `chats list` reports the bare JID as the name (app-state sync failed)...
+    chats = [
+        {
+            "jid": "120363000000000000@g.us",
+            "kind": "group",
+            "name": "120363000000000000@g.us",
+        }
+    ]
+    client = _client()
+    monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
+    # ...but the group table has the real subject.
+    monkeypatch.setattr(
+        client, "group_names", lambda *a, **k: {"120363000000000000@g.us": "Mi Grupo"}
+    )
+
+    ref = client.resolve_chat("Mi Grupo")
+    assert ref.jid == "120363000000000000@g.us"
+    assert ref.name == "Mi Grupo"
+    assert ref.chat_type == "group"
+
+
+def test_resolve_chat_skips_group_lookup_when_names_present(monkeypatch) -> None:
+    # No placeholder group rows, so the (network) group lookup must not run.
+    client = _client_with_chats(monkeypatch, _CHATS)
+
+    def boom(*a, **k):
+        raise AssertionError("group_names should not be called when no name is missing")
+
+    monkeypatch.setattr(client, "group_names", boom)
+    ref = client.resolve_chat("Familia")
+    assert ref.jid == "120363000000000000@g.us"
+
+
+def test_resolve_chat_backfill_is_best_effort(monkeypatch) -> None:
+    chats = [
+        {
+            "jid": "120363000000000000@g.us",
+            "kind": "group",
+            "name": "120363000000000000@g.us",
+        }
+    ]
+    client = _client()
+    monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
+
+    def boom(*a, **k):
+        raise WacliError("group lookup failed")
+
+    monkeypatch.setattr(client, "group_names", boom)
+    # The JID still resolves even though the name backfill failed.
+    ref = client.resolve_chat("120363000000000000@g.us")
+    assert ref.jid == "120363000000000000@g.us"
+
+
+# --------------------------------------------------------------------------- #
 # sync_once summary
 # --------------------------------------------------------------------------- #
 def test_sync_once_summarizes_counts(monkeypatch) -> None:

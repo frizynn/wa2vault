@@ -150,6 +150,14 @@ On other systems, install via your package manager or from [ffmpeg.org](https://
    wa2vault chats
    ```
 
+   > [!NOTE]
+   > **Groups showing their JID instead of a name?** After pairing, WhatsApp's
+   > "app state" sync (which carries chat-level names) can fail with an LTHash
+   > mismatch, so the chat list reports a group's bare JID as its name. wa2vault
+   > backfills those names from wacli's dedicated group table automatically. If a
+   > group is still nameless, fetch them live with `wa2vault chats
+   > --refresh-groups`. You can always pull by JID regardless.
+
 4. Pull the last N days into the vault:
 
    ```bash

@@ -32,7 +32,7 @@ import typer
 from wa2vault import __version__
 from wa2vault.config import Config
 from wa2vault.contacts import ContactBook, pretty_phone
-from wa2vault.wacli import WacliClient, WacliError
+from wa2vault.wacli import WacliClient, WacliError, _is_placeholder_group
 
 app = typer.Typer(
     name="wa2vault",
@@ -199,14 +199,36 @@ def chats(
         int,
         typer.Option("--limit", min=1, help="Maximum number of chats to list."),
     ] = 100,
+    refresh_groups: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-groups/--no-refresh-groups",
+            help=(
+                "Fetch joined groups live before listing, to recover group names "
+                "WhatsApp's app-state sync never delivered (slower; hits the "
+                "network)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """List chats so you can find the exact name/JID to pass to `pull`.
 
-    Calls ``wacli chats list --json`` and prints a clean table of
-    name, type, and JID.
+    Calls ``wacli chats list --json`` and prints a clean table of name, type,
+    and JID. Group names that are missing from the chat list (a common result of
+    WhatsApp app-state sync failing after pairing) are backfilled from wacli's
+    group table; pass ``--refresh-groups`` to fetch them live first.
     """
     config = _config(ctx)
     client = WacliClient(config)
+    if refresh_groups:
+        try:
+            client.refresh_groups(timeout=config.sync_timeout)
+        except WacliError as exc:
+            typer.secho(
+                f"warning: could not refresh groups: {exc}",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
     try:
         rows = client.list_chats(limit=limit)
     except WacliError as exc:
@@ -218,16 +240,35 @@ def chats(
         raise typer.Exit(code=0)
 
     book = ContactBook(config.contacts_file)
-    _print_chats_table(rows, book)
+    _print_chats_table(rows, book, _safe_group_names(client))
 
 
-def _display_name(row: dict, jid: str, raw_name: str, book: ContactBook) -> str:
+def _safe_group_names(client: WacliClient) -> dict[str, str]:
+    """Best-effort group JID -> name map; never raises so `chats` still lists on error."""
+    try:
+        return client.group_names()
+    except WacliError:
+        return {}
+
+
+def _display_name(
+    row: dict,
+    jid: str,
+    raw_name: str,
+    book: ContactBook,
+    group_names: dict[str, str],
+) -> str:
     """Pick the best display name for a chat row.
 
-    For DM chats whose name is missing or just echoes the JID/phone, fall back
-    to a saved contact name, then to a readable phone. Groups and channels keep
+    Groups whose name is missing or just echoes the JID (a WhatsApp app-state
+    sync failure) are backfilled from ``group_names``, falling back to a clear
+    ``(unnamed group)`` marker. For DM chats whose name echoes the JID/phone,
+    fall back to a saved contact name, then to a readable phone. Channels keep
     their real names untouched.
     """
+    if _is_placeholder_group(jid, raw_name or None):
+        return group_names.get(jid) or "(unnamed group)"
+
     if not jid.endswith("@s.whatsapp.net"):
         return raw_name or "(unnamed)"
 
@@ -238,7 +279,9 @@ def _display_name(row: dict, jid: str, raw_name: str, book: ContactBook) -> str:
     return raw_name
 
 
-def _print_chats_table(rows: list[dict], book: ContactBook) -> None:
+def _print_chats_table(
+    rows: list[dict], book: ContactBook, group_names: dict[str, str]
+) -> None:
     """Print chats as an aligned NAME / TYPE / JID table."""
 
     def field(row: dict, *keys: str) -> str:
@@ -255,6 +298,7 @@ def _print_chats_table(rows: list[dict], book: ContactBook) -> None:
                 field(row, "jid", "chat_jid", "id"),
                 field(row, "name", "display_name", "subject"),
                 book,
+                group_names,
             ),
             field(row, "type", "chat_type") or "-",
             field(row, "jid", "chat_jid", "id"),
