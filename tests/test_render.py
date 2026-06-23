@@ -161,6 +161,60 @@ def test_image_without_media_falls_back() -> None:
     assert "*(imagen no disponible)*" in markdown
 
 
+def test_document_with_media_renders_clickable_link() -> None:
+    # A document with no caption (text is None after parsing strips wacli's
+    # synthetic "Sent document" placeholder) links cleanly.
+    record = _record(
+        id="doc1",
+        kind="document",
+        media_path=Path("Chats/_media/grupo/Propuesta.pdf"),
+        text=None,
+    )
+    markdown = _render([record])
+    # Documents link with [[...]] so they are clickable/openable in Obsidian.
+    assert "[[Chats/_media/grupo/Propuesta.pdf]]" in markdown
+    # The generic "*[documento]*" placeholder must not appear when the file is linked.
+    assert "*[documento]*" not in markdown
+
+
+def test_document_with_caption_renders_link_and_caption() -> None:
+    record = _record(
+        id="doc-cap",
+        kind="document",
+        media_path=Path("Chats/_media/grupo/factura.pdf"),
+        text="acá va la factura",
+    )
+    markdown = _render([record])
+    assert "[[Chats/_media/grupo/factura.pdf]]" in markdown
+    assert "acá va la factura" in markdown
+
+
+def test_document_without_media_falls_back_to_placeholder() -> None:
+    record = _record(id="doc2", kind="document")
+    markdown = _render([record])
+    assert "*[documento]*" in markdown
+
+
+def test_expired_media_renders_explicit_message() -> None:
+    image = _record(id="img-exp", kind="image", media_path=None, media_expired=True)
+    audio = _record(id="aud-exp", kind="ptt", media_path=None, media_expired=True)
+    markdown = _render([image, audio])
+    # Expired media reads as gone, not as a generic "unavailable"/"untranscribed".
+    assert markdown.count("*(media expirada en WhatsApp, no se pudo descargar)*") == 2
+    assert "*(imagen no disponible)*" not in markdown
+    assert "*(audio sin transcribir)*" not in markdown
+
+
+def test_audio_empty_transcript_is_distinct_from_untranscribed() -> None:
+    # transcript="" means ASR ran and produced nothing transcribable; that is a
+    # distinct, explicit state from "not transcribed at all" (transcript=None).
+    empty = _record(id="aud-empty", kind="ptt", transcript="")
+    untried = _record(id="aud-none", kind="ptt", transcript=None)
+    markdown = _render([empty, untried])
+    assert "*(audio sin contenido transcribible)*" in markdown
+    assert "*(audio sin transcribir)*" in markdown
+
+
 def test_reply_marker_and_sender_labels() -> None:
     markdown = _render(_sample_records())
     # from_me -> "Yo"; reply prefixes the header with the marker.

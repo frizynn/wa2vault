@@ -54,6 +54,11 @@ _MEDIA_SUBDIR = "_media"
 #: Message kinds that carry a transcribable voice note.
 _AUDIO_KINDS = frozenset({"ptt", "audio"})
 
+#: Media kinds that are copied into the vault and linked from the note (images
+#: are embedded; everything else is linked). Audio is excluded: it is consumed
+#: via its transcript, not a file link.
+_FILE_MEDIA_KINDS = frozenset({"image", "video", "document", "sticker"})
+
 #: A sender name that is really just a phone number / bare JID (digits, an
 #: optional leading "+", spaces/dashes, optionally followed by an "@server"
 #: suffix). Such names are replaced by the resolved contact name for DM chats.
@@ -302,14 +307,15 @@ def _resolve_media(
 ) -> list[MessageRecord]:
     """Return ``records`` with media materialized into the vault.
 
-    For every media-bearing record, ``ensure_media`` returns a local path (or
-    None when the attachment is expired/unavailable). Image files are copied
-    into the vault attachments directory and ``media_path`` is set to the path
-    **relative to the vault root** so Obsidian ``![[...]]`` embeds resolve;
-    other media get ``media_path = None`` (audio is consumed via the transcript,
-    not the path). Local audio paths are recorded in ``local_audio_paths`` for
-    the transcription step. The input records are not mutated; a new list is
-    returned.
+    For every media-bearing record, ``ensure_media`` reports a local file (or
+    that the media expired on WhatsApp's CDN). File-bearing media (images,
+    documents, videos, stickers) are copied into the vault attachments directory
+    and ``media_path`` is set to the path **relative to the vault root** so
+    Obsidian embeds/links resolve; audio keeps no path (it is consumed via the
+    transcript) but its local file is recorded in ``local_audio_paths`` for the
+    transcription step. Media that expired on the CDN is flagged on the record so
+    the renderer can say so explicitly. The input records are not mutated; a new
+    list is returned.
     """
     attachments_dir = (
         config.vault_dir / config.output_subdir / _MEDIA_SUBDIR / chat_slug
@@ -317,51 +323,69 @@ def _resolve_media(
 
     resolved: list[MessageRecord] = []
     for record in records:
-        local = client.ensure_media(record)
-        if local is None:
-            # Reset any stale local path so the renderer shows the fallback.
-            resolved.append(record.model_copy(update={"media_path": None}))
+        media = client.ensure_media(record)
+        if media.path is None:
+            # Reset any stale local path so the renderer shows the fallback,
+            # marking expired media so it reads as "gone" rather than a bug.
+            resolved.append(
+                record.model_copy(
+                    update={"media_path": None, "media_expired": media.expired}
+                )
+            )
             continue
 
-        if record.kind == "image":
-            vault_path = _copy_image_into_vault(
-                local,
+        if record.kind in _AUDIO_KINDS:
+            # Keep the local audio path for transcription only; the renderer
+            # uses the transcript, not the path.
+            local_audio_paths[record.id] = media.path
+            resolved.append(record.model_copy(update={"media_path": None}))
+        elif record.kind in _FILE_MEDIA_KINDS:
+            vault_path = _copy_media_into_vault(
+                media.path,
                 attachments_dir=attachments_dir,
                 vault_dir=config.vault_dir,
-                chat_slug=chat_slug,
+                filename=_attachment_filename(record, media.path),
                 warnings=warnings,
             )
             resolved.append(record.model_copy(update={"media_path": vault_path}))
-        elif record.kind in _AUDIO_KINDS:
-            # Keep the local audio path for transcription only; the renderer
-            # uses the transcript, not the path.
-            local_audio_paths[record.id] = local
-            resolved.append(record.model_copy(update={"media_path": None}))
         else:
             resolved.append(record.model_copy(update={"media_path": None}))
     return resolved
 
 
-def _copy_image_into_vault(
+def _attachment_filename(record: MessageRecord, local: Path) -> str:
+    """Pick a readable filename for an attachment copied into the vault.
+
+    Documents carry an original ``Filename`` (e.g. ``Propuesta.pdf``) worth
+    preserving so the vault link is meaningful; other media fall back to the
+    downloaded file's name. The result is sanitized to a safe basename.
+    """
+    raw_name = record.raw.get("Filename") or record.raw.get("filename")
+    candidate = str(raw_name).strip() if raw_name else ""
+    return Path(candidate).name or local.name
+
+
+def _copy_media_into_vault(
     local: Path,
     *,
     attachments_dir: Path,
     vault_dir: Path,
-    chat_slug: str,
+    filename: str,
     warnings: list[str],
 ) -> Path | None:
-    """Copy an image into the vault, returning its vault-relative path.
+    """Copy an attachment into the vault, returning its vault-relative path.
 
     Returns the path relative to ``vault_dir`` (e.g.
     ``Chats/_media/<slug>/<file>``) on success, or None if the copy failed (in
-    which case the image renders as unavailable).
+    which case the attachment renders as unavailable). The file is stored under
+    ``filename`` so documents keep their original, readable name.
     """
     try:
         attachments_dir.mkdir(parents=True, exist_ok=True)
-        destination = attachments_dir / local.name
+        destination = attachments_dir / filename
         shutil.copyfile(local, destination)
     except OSError as exc:
-        warnings.append(f"could not copy image {local.name!r} into vault: {exc}")
+        warnings.append(f"could not copy attachment {filename!r} into vault: {exc}")
         return None
     return destination.relative_to(vault_dir)
 

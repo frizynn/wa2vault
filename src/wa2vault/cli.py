@@ -290,14 +290,21 @@ def _display_name(
 ) -> str:
     """Pick the best display name for a chat row.
 
-    Groups whose name is missing or just echoes the JID (a WhatsApp app-state
-    sync failure) are backfilled from ``group_names``, falling back to a clear
-    ``(unnamed group)`` marker. For DM chats whose name echoes the JID/phone,
-    fall back to a saved contact name, then to a readable phone. Channels keep
-    their real names untouched.
+    For groups, the group table's subject (``group_names``) is authoritative and
+    overrides the ``chats list`` name, which is unreliable -- it may be missing,
+    echo the JID (a WhatsApp app-state sync failure), or even carry a
+    participant's name instead of the subject. A group with neither a real
+    chat-list name nor a known subject falls back to ``(unnamed group)``. For DM
+    chats whose name echoes the JID/phone, fall back to a saved contact name,
+    then to a readable phone. Channels keep their real names untouched.
     """
-    if _is_placeholder_group(jid, raw_name or None):
-        return group_names.get(jid) or "(unnamed group)"
+    if jid.endswith("@g.us"):
+        subject = group_names.get(jid)
+        if subject:
+            return subject
+        if _is_placeholder_group(jid, raw_name or None):
+            return "(unnamed group)"
+        return raw_name or "(unnamed group)"
 
     if not jid.endswith("@s.whatsapp.net"):
         return raw_name or "(unnamed)"

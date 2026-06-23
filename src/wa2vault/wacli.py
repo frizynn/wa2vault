@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -116,6 +117,22 @@ class ChatNotUnique(WacliError):
 
 
 @dataclass(frozen=True)
+class MediaResult:
+    """Outcome of materializing a message's media via :meth:`WacliClient.ensure_media`.
+
+    Attributes:
+        path: Local path to the media file, or None when no file is available.
+        expired: True when the media could not be fetched because WhatsApp's CDN
+            no longer serves it (HTTP 404/410 - the media expired and cannot be
+            re-downloaded). This lets the renderer say so explicitly instead of
+            showing a bare "unavailable" placeholder that looks like a bug.
+    """
+
+    path: Path | None
+    expired: bool = False
+
+
+@dataclass(frozen=True)
 class ChatRef:
     """A resolved reference to a single WhatsApp chat.
 
@@ -141,6 +158,11 @@ _CHAT_KIND_MAP: dict[str, ChatType] = {
 # wacli's message/media type -> our normalized MessageKind. Voice notes ("ptt",
 # push-to-talk) are kept distinct from regular "audio" so only they are
 # transcribed by default. "gif" is a short looping video on WhatsApp.
+# Message kinds whose text body is real user text (not a media caption). For
+# every other kind, wacli's DisplayText is a synthetic placeholder, so only the
+# explicit MediaCaption is treated as the message's text.
+_TEXT_KINDS: frozenset[MessageKind] = frozenset({"text", "system"})
+
 _MEDIA_KIND_MAP: dict[str, MessageKind] = {
     "image": "image",
     "video": "video",
@@ -454,15 +476,18 @@ class WacliClient:
         raise ChatNotFound(f"No chat matches query {query!r}")
 
     def _backfill_group_names(self, chats: list[ChatRef]) -> list[ChatRef]:
-        """Fill in group names missing from ``chats list`` using the group table.
+        """Name group chats by their subject from the group table.
 
-        A group :class:`ChatRef` whose name is absent or just echoes its JID gets
-        its real subject from :meth:`group_names`, when available. This lets a
-        user resolve a chat by its real group name even when WhatsApp's app-state
-        sync never delivered it to the chat list. Best-effort: if the group
-        lookup fails, the chats are returned unchanged.
+        wacli's ``chats list`` ``name`` for a group is unreliable: it is missing
+        or just echoes the JID when WhatsApp's app-state sync failed, and it can
+        even carry a *participant's* name instead of the group subject. wacli's
+        dedicated group table (:meth:`group_names`), by contrast, holds the real
+        group subject. So for every group chat we prefer that subject when one
+        exists, overriding the chat-list name. This lets a user resolve a group
+        by its real subject and gives the note the right title. Best-effort: if
+        the group lookup fails, the chats are returned unchanged.
         """
-        if not any(_is_placeholder_group(c.jid, c.name) for c in chats):
+        if not any(c.chat_type == "group" for c in chats):
             return chats
         try:
             names = self.group_names()
@@ -472,10 +497,10 @@ class WacliClient:
             return chats
         patched: list[ChatRef] = []
         for c in chats:
-            if _is_placeholder_group(c.jid, c.name):
-                real = names.get(c.jid)
-                if real:
-                    c = ChatRef(jid=c.jid, name=real, chat_type=c.chat_type)
+            if c.chat_type == "group":
+                subject = names.get(c.jid)
+                if subject and subject != c.name:
+                    c = ChatRef(jid=c.jid, name=subject, chat_type=c.chat_type)
             patched.append(c)
         return patched
 
@@ -529,32 +554,34 @@ class WacliClient:
             records.append(record)
         return records
 
-    def ensure_media(self, record: MessageRecord) -> Path | None:
-        """Ensure a message's media file is present locally, returning its path.
+    def ensure_media(self, record: MessageRecord) -> MediaResult:
+        """Ensure a message's media file is present locally.
 
         If ``record.media_path`` already points at an existing file, it is
         returned unchanged. Otherwise wacli downloads the media into the cache
         directory. Because wa2vault runs wacli read-only, the download requires
         an explicit ``--output`` path and is not recorded in wacli's store.
 
-        Old media can expire on WhatsApp's CDN (HTTP 404); in that case wacli
-        exits non-zero, which is caught here and reported as ``None`` rather
-        than raised, so a single expired attachment never aborts a pull.
+        Old media can expire on WhatsApp's CDN (HTTP 404/410); in that case wacli
+        exits non-zero, which is caught here and reported as an ``expired``
+        result rather than raised, so a single expired attachment never aborts a
+        pull and the renderer can say so explicitly.
 
         Args:
             record: The message whose media to materialize. Records with no
                 media (``kind == "text"`` / ``"system"`` and no media metadata)
-                return None.
+                return an empty result.
 
         Returns:
-            The local :class:`~pathlib.Path` to the media file, or None if the
-            message has no media or the media is unavailable/expired.
+            A :class:`MediaResult`: ``path`` is the local media file when it
+            could be materialized, otherwise None; ``expired`` is True when the
+            media was lost on WhatsApp's CDN.
         """
         if record.media_path is not None and record.media_path.exists():
-            return record.media_path
+            return MediaResult(path=record.media_path)
 
         if not _has_media(record):
-            return None
+            return MediaResult(path=None)
 
         target = self._media_target(record)
         try:
@@ -568,13 +595,14 @@ class WacliClient:
                 "--output",
                 str(target),
             )
-        except WacliError:
-            # Expired/unavailable media (e.g. 404 on WhatsApp's CDN) or a
-            # message wacli has no downloadable metadata for: degrade to None.
-            return None
+        except WacliError as exc:
+            # Media lost on WhatsApp's CDN (404/410) cannot be re-downloaded;
+            # flag it as expired so the renderer can distinguish it from a
+            # message wacli simply has no downloadable metadata for.
+            return MediaResult(path=None, expired=_is_expired_media_error(exc))
 
         path = _download_path(data) or target
-        return path if path.exists() else None
+        return MediaResult(path=path if path.exists() else None)
 
     def _media_target(self, record: MessageRecord) -> Path:
         """Compute the local output path for a message's downloaded media."""
@@ -642,12 +670,17 @@ class WacliClient:
         media_mime = _first_str(raw, "MimeType", "mime_type")
         reply_to = _first_str(raw, "QuotedMsgID", "quoted_msg_id")
 
-        # Prefer the render-ready display text, then raw text, then caption.
-        text = (
-            _first_str(raw, "DisplayText", "display_text")
-            or _first_str(raw, "Text", "text")
-            or _first_str(raw, "MediaCaption", "media_caption")
+        display_text = _first_str(raw, "DisplayText", "display_text") or _first_str(
+            raw, "Text", "text"
         )
+        caption = _first_str(raw, "MediaCaption", "media_caption")
+        kind = cls._map_kind(media_type, media_mime, display_text)
+
+        # For media messages, the only meaningful text is the user's caption:
+        # wacli's DisplayText is a synthetic placeholder ("Sent document", "Sent
+        # audio", "[Audio]", ...) that must not leak into the note. For plain
+        # text/system messages, use the display/raw text.
+        text = caption if kind not in _TEXT_KINDS else display_text
 
         local_path = _first_str(raw, "LocalPath", "local_path")
         media_path = Path(local_path) if local_path else None
@@ -663,7 +696,7 @@ class WacliClient:
             from_me=from_me,
             sender_jid=sender_jid or None,
             sender_name=sender_name or None,
-            kind=cls._map_kind(media_type, media_mime, text),
+            kind=kind,
             text=text or None,
             media_path=media_path,
             media_mime=media_mime or None,
@@ -819,6 +852,24 @@ def _media_suffix(record: MessageRecord) -> str:
     return kind_suffixes.get(record.kind, ".bin")
 
 
+#: Matches the HTTP status wacli reports when WhatsApp's CDN no longer serves a
+#: media file: 404 (Not Found) or 410 (Gone). Anchored to a "status code" phrase
+#: so a stray "404" elsewhere in the message (e.g. inside a filename or path)
+#: cannot be mistaken for an expiry.
+_EXPIRED_MEDIA_STATUS_RE = re.compile(r"status\s*code\s*(?:404|410)\b", re.IGNORECASE)
+
+
+def _is_expired_media_error(exc: WacliError) -> bool:
+    """Return True if a media-download error means the media expired on the CDN.
+
+    WhatsApp serves attachment bytes from a CDN that drops old media; once gone,
+    a download returns HTTP 404 (Not Found) or 410 (Gone) and the bytes cannot
+    be recovered. wacli surfaces that status in its error message, which is the
+    only signal available here.
+    """
+    return _EXPIRED_MEDIA_STATUS_RE.search(str(exc)) is not None
+
+
 def _download_path(data: Any) -> Path | None:
     """Extract the downloaded file path from wacli's ``media download`` payload."""
     if isinstance(data, dict):
@@ -849,6 +900,7 @@ __all__ = [
     "WacliClient",
     "WacliError",
     "ChatRef",
+    "MediaResult",
     "ChatNotFound",
     "ChatNotUnique",
 ]

@@ -26,6 +26,7 @@ from wa2vault.wacli import (
     ChatNotFound,
     ChatNotUnique,
     ChatRef,
+    MediaResult,
     WacliClient,
     WacliError,
 )
@@ -188,6 +189,48 @@ def test_parse_ptt_message_maps_kind_and_reply() -> None:
     assert record.text is None
 
 
+def test_parse_document_strips_placeholder_display_text() -> None:
+    # wacli emits DisplayText "Sent document" as a synthetic placeholder; with no
+    # real MediaCaption the parsed text must be None so it never leaks into the
+    # note as a fake caption.
+    row = {
+        "ChatJID": "120363000000000000@g.us",
+        "MsgID": "DOC0009",
+        "SenderName": "Alex",
+        "Timestamp": "2026-06-17T18:54:39Z",
+        "FromMe": False,
+        "Text": "",
+        "DisplayText": "Sent document",
+        "MediaType": "document",
+        "MediaCaption": "",
+        "Filename": "Propuesta.pdf",
+        "MimeType": "application/pdf",
+    }
+    record = WacliClient._parse_message(row)
+    assert record is not None
+    assert record.kind == "document"
+    assert record.text is None
+    assert record.raw["Filename"] == "Propuesta.pdf"
+
+
+def test_parse_document_keeps_real_caption() -> None:
+    row = {
+        "ChatJID": "120363000000000000@g.us",
+        "MsgID": "DOC0010",
+        "Timestamp": "2026-06-17T18:54:39Z",
+        "FromMe": True,
+        "Text": "",
+        "DisplayText": "Sent document",
+        "MediaType": "document",
+        "MediaCaption": "acá va la factura",
+        "Filename": "factura.pdf",
+        "MimeType": "application/pdf",
+    }
+    record = WacliClient._parse_message(row)
+    assert record is not None
+    assert record.text == "acá va la factura"
+
+
 def test_parse_message_preserves_raw_verbatim() -> None:
     row = _ptt_message()
     record = WacliClient._parse_message(row)
@@ -306,6 +349,10 @@ _CHATS = [
 def _client_with_chats(monkeypatch, chats: list[dict]) -> WacliClient:
     client = _client()
     monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
+    # Stub the group-name lookup so name-resolution tests never shell out to the
+    # wacli binary; tests that exercise the group-subject backfill stub it with
+    # their own mapping.
+    monkeypatch.setattr(client, "group_names", lambda *a, **k: {})
     return client
 
 
@@ -460,16 +507,45 @@ def test_resolve_chat_backfills_group_name(monkeypatch) -> None:
     assert ref.chat_type == "group"
 
 
-def test_resolve_chat_skips_group_lookup_when_names_present(monkeypatch) -> None:
-    # No placeholder group rows, so the (network) group lookup must not run.
-    client = _client_with_chats(monkeypatch, _CHATS)
+def test_resolve_chat_group_subject_overrides_participant_name(monkeypatch) -> None:
+    # `chats list` names the group after a *participant* (a pushname leaking
+    # into the chat-list name), not the real subject. The group table's subject
+    # must win, so the group resolves by its real name.
+    chats = [
+        {"jid": "120363999999999999@g.us", "kind": "group", "name": "Pat Lee"},
+        {"jid": "5491100000000@s.whatsapp.net", "kind": "dm", "name": "Pat Lee"},
+    ]
+    client = _client()
+    monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
+    monkeypatch.setattr(
+        client,
+        "group_names",
+        lambda *a, **k: {"120363999999999999@g.us": "Proyecto Alfa"},
+    )
+
+    ref = client.resolve_chat("Proyecto Alfa")
+    assert ref.jid == "120363999999999999@g.us"
+    assert ref.name == "Proyecto Alfa"
+    assert ref.chat_type == "group"
+
+    # And the participant DM still resolves under its own name, no longer
+    # colliding with the group (whose name is now the subject).
+    dm = client.resolve_chat("Pat Lee")
+    assert dm.jid == "5491100000000@s.whatsapp.net"
+
+
+def test_resolve_chat_skips_group_lookup_when_no_groups(monkeypatch) -> None:
+    # No group rows at all, so the group lookup must not run.
+    chats = [{"jid": "5491111111111@s.whatsapp.net", "kind": "dm", "name": "Alice"}]
+    client = _client()
+    monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
 
     def boom(*a, **k):
-        raise AssertionError("group_names should not be called when no name is missing")
+        raise AssertionError("group_names should not be called when there are no groups")
 
     monkeypatch.setattr(client, "group_names", boom)
-    ref = client.resolve_chat("Familia")
-    assert ref.jid == "120363000000000000@g.us"
+    ref = client.resolve_chat("Alice")
+    assert ref.jid == "5491111111111@s.whatsapp.net"
 
 
 def test_resolve_chat_backfill_is_best_effort(monkeypatch) -> None:
@@ -579,10 +655,10 @@ def test_ensure_media_returns_existing_path(tmp_path: Path) -> None:
     existing.write_bytes(b"x")
     record = _media_record(tmp_path, media_path=existing)
     client = _client()
-    assert client.ensure_media(record) == existing
+    assert client.ensure_media(record) == MediaResult(path=existing)
 
 
-def test_ensure_media_returns_none_for_text(tmp_path: Path) -> None:
+def test_ensure_media_returns_empty_for_text(tmp_path: Path) -> None:
     record = MessageRecord(
         id="T1",
         chat_jid="x@s.whatsapp.net",
@@ -592,7 +668,7 @@ def test_ensure_media_returns_none_for_text(tmp_path: Path) -> None:
         kind="text",
         text="hi",
     )
-    assert _client().ensure_media(record) is None
+    assert _client().ensure_media(record) == MediaResult(path=None)
 
 
 def test_ensure_media_downloads_and_returns_path(tmp_path: Path, monkeypatch) -> None:
@@ -609,20 +685,57 @@ def test_ensure_media_downloads_and_returns_path(tmp_path: Path, monkeypatch) ->
 
     monkeypatch.setattr(client, "run_json", fake_run_json)
     result = client.ensure_media(record)
-    assert result is not None
-    assert result.exists()
-    assert result.suffix == ".jpg"
+    assert result.path is not None
+    assert result.path.exists()
+    assert result.path.suffix == ".jpg"
+    assert result.expired is False
 
 
-def test_ensure_media_expired_returns_none(tmp_path: Path, monkeypatch) -> None:
+def test_ensure_media_downloads_document(tmp_path: Path, monkeypatch) -> None:
+    """A document attachment is downloaded just like an image."""
+    client = WacliClient(Config(cache_dir=tmp_path / "cache"))
+    record = _media_record(
+        tmp_path,
+        id="DOC0001",
+        kind="document",
+        media_mime="application/pdf",
+        raw={"Filename": "Propuesta.pdf"},
+    )
+
+    def fake_run_json(*args, **kwargs):
+        out = Path(args[args.index("--output") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"%PDF-1.4")
+        return {"path": str(out), "bytes": 7, "downloaded": True, "read_only": True}
+
+    monkeypatch.setattr(client, "run_json", fake_run_json)
+    result = client.ensure_media(record)
+    assert result.path is not None
+    assert result.path.exists()
+    assert result.path.suffix == ".pdf"
+
+
+def test_ensure_media_expired_is_flagged(tmp_path: Path, monkeypatch) -> None:
     client = WacliClient(Config(cache_dir=tmp_path / "cache"))
     record = _media_record(tmp_path)
 
     def boom(*args, **kwargs):
-        raise WacliError("download failed: 404 from CDN (media expired)")
+        raise WacliError("download failed with status code 410")
 
     monkeypatch.setattr(client, "run_json", boom)
-    assert client.ensure_media(record) is None
+    assert client.ensure_media(record) == MediaResult(path=None, expired=True)
+
+
+def test_ensure_media_non_expiry_error_is_not_flagged(tmp_path: Path, monkeypatch) -> None:
+    """A download error that is not a CDN-expiry (404/410) is not flagged expired."""
+    client = WacliClient(Config(cache_dir=tmp_path / "cache"))
+    record = _media_record(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise WacliError("download failed with status code 500")
+
+    monkeypatch.setattr(client, "run_json", boom)
+    assert client.ensure_media(record) == MediaResult(path=None, expired=False)
 
 
 # --------------------------------------------------------------------------- #

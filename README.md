@@ -187,7 +187,7 @@ On first run, wa2vault writes a TOML config to the user config dir (Linux:
 | `asr_model`     | `medium`                       | ASR model name/size.                                  |
 | `language`      | `es`                           | Default language hint for transcription (ISO-639-1).  |
 | `default_days`  | `30`                           | Default `--days` window for `pull`.                   |
-| `sync_timeout`  | `90.0`                         | Max seconds the pull waits for the store sync before proceeding with the local store. Empty = wait forever. |
+| `sync_timeout`  | `300.0`                        | Max seconds the pull waits for the store sync before proceeding with the local store. Empty = wait forever. |
 | `cache_dir`     | platform cache dir             | Transcript cache + scratch files.                     |
 
 > [!NOTE]

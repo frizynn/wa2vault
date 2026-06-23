@@ -113,6 +113,14 @@ class MessageRecord(BaseModel):
             "MIME type of the media (e.g. 'audio/ogg; codecs=opus', 'image/jpeg'), if known."
         ),
     )
+    media_expired: bool = Field(
+        default=False,
+        description=(
+            "True when this message's media could not be downloaded because it "
+            "expired on WhatsApp's CDN (HTTP 404/410). Lets the renderer say the "
+            "media is gone rather than show a generic 'unavailable' placeholder."
+        ),
+    )
     transcript: str | None = Field(
         default=None,
         description=(

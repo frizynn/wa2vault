@@ -18,7 +18,7 @@ from wa2vault import pipeline
 from wa2vault.config import Config
 from wa2vault.lock import StoreLock
 from wa2vault.models import MessageRecord
-from wa2vault.wacli import ChatRef, WacliError
+from wa2vault.wacli import ChatRef, MediaResult, WacliError
 
 
 class FakeWacliClient:
@@ -35,10 +35,12 @@ class FakeWacliClient:
         chatref: ChatRef,
         records: list[MessageRecord],
         media_files: dict[str, Path],
+        expired_media: set[str] | None = None,
     ) -> None:
         self._chatref = chatref
         self._records = records
         self._media_files = media_files
+        self._expired_media = expired_media or set()
         self.sync_calls = 0
         self.sync_timeout: float | None = None
         self.sync_error: Exception | None = None
@@ -70,8 +72,11 @@ class FakeWacliClient:
     ) -> list[MessageRecord]:
         return self._records
 
-    def ensure_media(self, record: MessageRecord) -> Path | None:
-        return self._media_files.get(record.id)
+    def ensure_media(self, record: MessageRecord) -> MediaResult:
+        path = self._media_files.get(record.id)
+        if path is not None:
+            return MediaResult(path=path)
+        return MediaResult(path=None, expired=record.id in self._expired_media)
 
 
 def _build_records(image_local: Path) -> list[MessageRecord]:
@@ -297,6 +302,89 @@ def test_pull_chat_skips_sync_when_another_instance_holds_the_lock(
     assert len(result.warnings) == 1
     assert "another wa2vault/wacli instance is syncing" in result.warnings[0]
     assert "pid 4242" in result.warnings[0]
+
+
+def test_pull_chat_copies_document_and_links_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A document attachment is copied into the vault and linked from the note."""
+    vault_dir = tmp_path / "vault"
+    config = Config(vault_dir=vault_dir, output_subdir="Chats", cache_dir=tmp_path / "cache")
+
+    source = tmp_path / "wacli_media"
+    source.mkdir()
+    doc_local = source / "3B3B46BA21CB15C1E866.pdf"
+    doc_local.write_bytes(b"%PDF-1.4 fake")
+
+    base = datetime(2026, 6, 17, 18, 0, tzinfo=UTC)
+    chatref = ChatRef(jid="120363000000000000@g.us", name="Mi Grupo", chat_type="group")
+    records = [
+        MessageRecord(
+            id="doc1",
+            chat_jid=chatref.jid,
+            chat_type="group",
+            timestamp=base,
+            from_me=False,
+            sender_name="Alex",
+            kind="document",
+            text=None,
+            media_mime="application/pdf",
+            raw={"Filename": "Propuesta Piloto.pdf"},
+        ),
+    ]
+    _install_fake_client(
+        monkeypatch, chatref=chatref, records=records, media_files={"doc1": doc_local}
+    )
+
+    result = pipeline.pull_chat(
+        config=config, chat="Mi Grupo", days=30, transcribe=False, download_media=True
+    )
+
+    # The PDF was copied under its readable original filename and linked.
+    copied = vault_dir / "Chats" / "_media" / "mi-grupo" / "Propuesta Piloto.pdf"
+    assert copied.exists()
+    content = result.note_path.read_text(encoding="utf-8")
+    assert "[[Chats/_media/mi-grupo/Propuesta Piloto.pdf]]" in content
+    assert "*[documento]*" not in content
+
+
+def test_pull_chat_flags_expired_audio_explicitly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Audio whose media expired on the CDN renders as 'expired', not a bare bug."""
+    vault_dir = tmp_path / "vault"
+    config = Config(vault_dir=vault_dir, output_subdir="Chats", cache_dir=tmp_path / "cache")
+
+    chatref = ChatRef(jid="123@s.whatsapp.net", name="Family", chat_type="dm")
+    records = [
+        MessageRecord(
+            id="aud-exp",
+            chat_jid=chatref.jid,
+            chat_type="dm",
+            timestamp=datetime(2026, 6, 2, 17, 25, tzinfo=UTC),
+            from_me=False,
+            sender_name="Alice",
+            kind="ptt",
+            media_mime="audio/ogg; codecs=opus",
+        ),
+    ]
+    fake = FakeWacliClient(
+        chatref=chatref,
+        records=records,
+        media_files={},  # no downloadable file
+        expired_media={"aud-exp"},  # ...because it expired on the CDN
+    )
+    monkeypatch.setattr(pipeline, "WacliClient", fake)
+    monkeypatch.setattr(pipeline, "find_store_lock", lambda config: None)
+
+    result = pipeline.pull_chat(
+        config=config, chat="Family", days=30, transcribe=True, download_media=True
+    )
+
+    content = result.note_path.read_text(encoding="utf-8")
+    assert "*(media expirada en WhatsApp, no se pudo descargar)*" in content
+    assert "*(audio sin transcribir)*" not in content
+    assert result.audios_transcribed == 0
 
 
 def test_pull_chat_without_media_renders_image_unavailable(

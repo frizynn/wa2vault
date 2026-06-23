@@ -33,6 +33,15 @@ def test_display_name_group_backfilled_from_map(tmp_path: Path) -> None:
     assert _display_name({}, "1@g.us", "1@g.us", _book(tmp_path), names) == "Backfilled Group"
 
 
+def test_display_name_group_subject_overrides_participant_name(tmp_path: Path) -> None:
+    # chats list named the group after a participant; the group subject wins.
+    names = {"1@g.us": "Proyecto Alfa"}
+    assert (
+        _display_name({}, "1@g.us", "Pat Lee", _book(tmp_path), names)
+        == "Proyecto Alfa"
+    )
+
+
 def test_display_name_group_unnamed_fallback(tmp_path: Path) -> None:
     assert _display_name({}, "1@g.us", "1@g.us", _book(tmp_path), {}) == "(unnamed group)"
 

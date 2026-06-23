@@ -35,8 +35,19 @@ _KIND_PLACEHOLDERS: dict[str, str] = {
     "other": "*[no soportado]*",
 }
 
+#: Media kinds rendered as a clickable vault link (the file is copied into the
+#: vault but not embedded inline). Images are handled separately as ``![[…]]``
+#: embeds; audio is consumed via its transcript.
+_LINKED_MEDIA_KINDS = ("document", "video", "sticker")
+
 _IMAGE_UNAVAILABLE = "*(imagen no disponible)*"
 _AUDIO_UNTRANSCRIBED = "*(audio sin transcribir)*"
+#: Shown when an audio note was downloaded and transcribed but came back empty
+#: (silence / unintelligible), so the empty result is not mistaken for a bug.
+_AUDIO_EMPTY_TRANSCRIPT = "*(audio sin contenido transcribible)*"
+#: Shown when media (audio, document, …) is gone from WhatsApp's CDN and can no
+#: longer be downloaded - an explicit state, not a generic "unavailable".
+_MEDIA_EXPIRED = "*(media expirada en WhatsApp, no se pudo descargar)*"
 #: Sender label for messages sent by the linked account (Spanish: "Me").
 _SELF_SENDER_LABEL = "Yo"
 #: Fallback sender label when neither a name nor a JID is known.
@@ -240,6 +251,8 @@ def _render_content(record: MessageRecord) -> str:
         return _render_audio(record)
     if record.kind == "text":
         return _clean_text(record.text) or _KIND_PLACEHOLDERS["other"]
+    if record.kind in _LINKED_MEDIA_KINDS:
+        return _render_attachment(record)
 
     placeholder = _KIND_PLACEHOLDERS.get(record.kind, _KIND_PLACEHOLDERS["other"])
     caption = _clean_text(record.text)
@@ -250,10 +263,12 @@ def _render_content(record: MessageRecord) -> str:
 
 def _render_image(record: MessageRecord) -> str:
     """Render an image message as an Obsidian embed plus optional caption."""
-    if record.media_path is None:
-        body = _IMAGE_UNAVAILABLE
-    else:
+    if record.media_path is not None:
         body = f"![[{_embed_target(record.media_path)}]]"
+    elif record.media_expired:
+        body = _MEDIA_EXPIRED
+    else:
+        body = _IMAGE_UNAVAILABLE
 
     caption = _clean_text(record.text)
     if caption:
@@ -261,12 +276,44 @@ def _render_image(record: MessageRecord) -> str:
     return body
 
 
+def _render_attachment(record: MessageRecord) -> str:
+    """Render a document / video / sticker as a clickable vault link or fallback.
+
+    When the file was copied into the vault, it is linked with Obsidian's
+    ``[[...]]`` so it is clickable (and openable for documents). Expired media is
+    called out explicitly; otherwise a per-kind placeholder is shown.
+    """
+    if record.media_path is not None:
+        body = f"[[{_embed_target(record.media_path)}]]"
+    elif record.media_expired:
+        body = _MEDIA_EXPIRED
+    else:
+        body = _KIND_PLACEHOLDERS.get(record.kind, _KIND_PLACEHOLDERS["other"])
+
+    caption = _clean_text(record.text)
+    if caption and caption != body:
+        return f"{body}\n{caption}"
+    return body
+
+
 def _render_audio(record: MessageRecord) -> str:
-    """Render a voice note / audio as a transcript blockquote or a fallback."""
+    """Render a voice note / audio as a transcript blockquote or a clear fallback.
+
+    Three non-transcript states are distinguished so an empty line never looks
+    like a bug: media expired on the CDN (cannot be transcribed), a download that
+    transcribed to empty text (silence / unintelligible), and audio not yet
+    transcribed.
+    """
     transcript = _clean_text(record.transcript)
     if transcript:
         quoted = "\n".join(f"> {line}" for line in transcript.splitlines())
         return f"> 🎤\n{quoted}" if "\n" in transcript else f"> 🎤 {transcript}"
+    if record.media_expired:
+        return _MEDIA_EXPIRED
+    if record.transcript is not None:
+        # A transcript was produced but is empty after cleaning: the audio was
+        # downloaded and run through ASR, it just had no transcribable speech.
+        return _AUDIO_EMPTY_TRANSCRIPT
     return _AUDIO_UNTRANSCRIBED
 
 

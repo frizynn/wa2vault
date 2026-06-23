@@ -106,7 +106,7 @@ class Config(BaseModel):
         description="Default number of days of history to pull when --days is omitted.",
     )
     sync_timeout: float | None = Field(
-        default=90.0,
+        default=300.0,
         description=(
             "Max seconds to wait for the best-effort store sync at the start of a "
             "pull. If the sync exceeds this (e.g. a large backlog on a stale "
