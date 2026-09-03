@@ -1,7 +1,7 @@
 """Local contact book: a JSON-backed ``jid -> name`` map.
 
 WhatsApp's app-state contact-name sync can fail on a linked device, leaving 1:1
-(DM) chats showing only a phone number (e.g. ``5491100000000@s.whatsapp.net``)
+(DM) chats showing only a phone number (e.g. ``15550100000@s.whatsapp.net``)
 instead of a person's name. This module provides a small, local override the
 user controls directly: save ``number -> name`` once, then list and pull chats
 by that friendly name.
@@ -14,9 +14,10 @@ display/resolution aid; it never talks to WhatsApp or wacli.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
+
+from wa2vault.fs import atomic_write_text
 
 #: Server suffix of a WhatsApp direct-message JID.
 _DM_SERVER = "s.whatsapp.net"
@@ -28,9 +29,9 @@ _DM_JID_RE = re.compile(r"^(\d+)@s\.whatsapp\.net$")
 def normalize_jid(raw: str) -> str:
     """Normalize a phone number or JID into a canonical WhatsApp JID.
 
-    Accepts a phone number in any human format ("+54 9 11 0000-0000",
-    "5491100000000", "549 11 0000 0000") or a full JID
-    ("549...@s.whatsapp.net", "...@g.us"). If ``raw`` already contains ``@`` it
+    Accepts a phone number in any human format ("+1 555 010-0000",
+    "15550100000", "1 555 010 0000") or a full JID
+    ("1555...@s.whatsapp.net", "...@g.us"). If ``raw`` already contains ``@`` it
     is treated as a JID and returned with surrounding whitespace stripped and
     lowercased. Otherwise every non-digit character is removed and the digits
     are wrapped as ``<digits>@s.whatsapp.net``.
@@ -113,11 +114,8 @@ class ContactBook:
 
     def _save(self) -> None:
         """Persist the map atomically (temp file + ``os.replace``)."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self._entries, ensure_ascii=False, indent=2, sort_keys=True)
-        tmp = self._path.with_name(f"{self._path.name}.tmp")
-        tmp.write_text(payload + "\n", encoding="utf-8")
-        os.replace(tmp, self._path)
+        atomic_write_text(self._path, payload + "\n")
 
     def set(self, number_or_jid: str, name: str) -> str:
         """Save ``name`` for the given number or JID and persist.

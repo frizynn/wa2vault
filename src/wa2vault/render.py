@@ -13,11 +13,15 @@ note can be safely re-rendered and overwritten without spurious diffs.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
+from wa2vault.fs import atomic_write_text, ensure_vault_is_safe
+from wa2vault.identity import chat_key, profile_key
 from wa2vault.models import MessageRecord
 
 # Spanish UI strings rendered into the note. They are centralized here and not
@@ -55,6 +59,8 @@ _UNKNOWN_SENDER_LABEL = "?"
 
 _REPLY_MARKER = "↳ "
 _FALLBACK_SLUG = "chat"
+_UNTRUSTED_START = "<!-- wa2vault:untrusted-content:start -->"
+_UNTRUSTED_END = "<!-- wa2vault:untrusted-content:end -->"
 
 
 def render_markdown(
@@ -65,6 +71,7 @@ def render_markdown(
     chat_type: str,
     days: int,
     generated_at: datetime,
+    profile: str = "default",
 ) -> str:
     """Render normalized messages to an Obsidian-friendly Markdown note.
 
@@ -87,11 +94,11 @@ def render_markdown(
     ordered = sorted(records, key=lambda record: record.timestamp)
 
     message_count = len(ordered)
-    images_count = sum(1 for record in ordered if record.kind == "image")
+    images_count = sum(
+        1 for record in ordered if record.kind == "image" and record.media_path is not None
+    )
     audios_transcribed = sum(
-        1
-        for record in ordered
-        if record.kind in ("ptt", "audio") and record.transcript
+        1 for record in ordered if record.kind in ("ptt", "audio") and record.transcript
     )
     date_range = _date_range(ordered)
 
@@ -105,6 +112,7 @@ def render_markdown(
         audios_transcribed=audios_transcribed,
         date_range=date_range,
         generated_at=generated_at,
+        profile=profile,
     )
 
     summary = _render_summary(
@@ -116,7 +124,7 @@ def render_markdown(
 
     body = _render_body(ordered)
 
-    parts = [frontmatter, f"# {chat_name}", summary]
+    parts = [frontmatter, f"# {_safe_inline(chat_name)}", summary]
     if body:
         parts.append(body)
 
@@ -129,6 +137,9 @@ def write_note(
     vault_dir: Path,
     output_subdir: str,
     chat_name: str,
+    chat_jid: str = "",
+    profile: str = "default",
+    allow_git_vault: bool = False,
 ) -> Path:
     """Write a rendered note into the vault, returning its path.
 
@@ -146,11 +157,24 @@ def write_note(
     Returns:
         The absolute path the note was written to.
     """
-    target_dir = vault_dir / output_subdir
-    target_dir.mkdir(parents=True, exist_ok=True)
+    ensure_vault_is_safe(vault_dir, allow_git_vault=allow_git_vault)
+    output_root = (vault_dir / output_subdir).resolve(strict=False)
+    vault_root = vault_dir.resolve(strict=False)
+    try:
+        output_root.relative_to(vault_root)
+    except ValueError as exc:
+        raise ValueError("output_subdir must stay inside vault_dir") from exc
+    if chat_jid:
+        target_dir = output_root / profile_key(profile)
+        filename = f"{chat_key(profile, chat_jid, chat_name)}.md"
+    else:
+        # Compatibility for callers of the original low-level helper. The pull
+        # pipeline always supplies a JID and therefore always uses safe identity.
+        target_dir = output_root
+        filename = f"{slugify(chat_name)}.md"
 
-    note_path = target_dir / f"{slugify(chat_name)}.md"
-    note_path.write_text(markdown, encoding="utf-8")
+    note_path = target_dir / filename
+    atomic_write_text(note_path, markdown)
     return note_path
 
 
@@ -168,14 +192,15 @@ def _render_frontmatter(
     audios_transcribed: int,
     date_range: tuple[str, str] | None,
     generated_at: datetime,
+    profile: str,
 ) -> str:
     """Build the YAML frontmatter block (including the ``---`` fences)."""
-    date_range_value = (
-        f"{date_range[0]} → {date_range[1]}" if date_range is not None else "null"
-    )
+    date_range_value = f"{date_range[0]} → {date_range[1]}" if date_range is not None else "null"
     lines = [
         "---",
         "source: whatsapp",
+        "content_trust: untrusted",
+        f"profile: {_yaml_scalar(profile)}",
         f"chat: {_yaml_scalar(chat_name)}",
         f"chat_jid: {_yaml_scalar(chat_jid)}",
         f"chat_type: {_yaml_scalar(chat_type)}",
@@ -235,12 +260,12 @@ def _render_body(records: list[MessageRecord]) -> str:
 def _render_message(record: MessageRecord) -> str:
     """Render a single message: a header line plus its content."""
     time = record.timestamp.strftime("%H:%M")
-    header = f"**{time} — {_sender_label(record)}**"
+    header = f"**{time} — {_safe_inline(_sender_label(record))}**"
     if record.reply_to_id:
         header = f"{_REPLY_MARKER}{header}"
 
     content = _render_content(record)
-    return f"{header}\n{content}"
+    return f"{_UNTRUSTED_START}\n{header}\n{content}\n{_UNTRUSTED_END}"
 
 
 def _render_content(record: MessageRecord) -> str:
@@ -351,10 +376,19 @@ def _embed_target(media_path: Path) -> str:
 
 
 def _clean_text(value: str | None) -> str:
-    """Return ``value`` stripped, or an empty string when None/blank."""
+    """Render hostile message text as inert, visibly delimited content lines."""
     if value is None:
         return ""
-    return value.strip()
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    return "\n".join(f"│ {escape(line, quote=False)}" for line in cleaned.splitlines())
+
+
+def _safe_inline(value: str) -> str:
+    """Escape an untrusted label and collapse it to one Markdown line."""
+    cleaned = escape(" ".join(value.splitlines()).strip(), quote=False)
+    return re.sub(r"([\\`*_{}\[\]()<>#+.!|~-])", r"\\\1", cleaned)
 
 
 def _yaml_scalar(value: str) -> str:
@@ -363,8 +397,7 @@ def _yaml_scalar(value: str) -> str:
     Double quoting is always applied so values containing ``:``, ``#``, leading
     spaces, or other YAML-significant characters serialize unambiguously.
     """
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    return json.dumps(value, ensure_ascii=False)
 
 
 def slugify(name: str) -> str:

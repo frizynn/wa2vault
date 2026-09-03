@@ -21,21 +21,18 @@ from wa2vault.contacts import ContactBook, normalize_jid, pretty_phone
 @pytest.mark.parametrize(
     "raw",
     [
-        "+54 9 11 0000-0000",
-        "5491100000000",
-        "549 11 0000 0000",
-        "(549) 11 0000 0000",
+        "+1 555 010-0000",
+        "15550100000",
+        "1 555 010 0000",
+        "(1) 555 010 0000",
     ],
 )
 def test_normalize_jid_phone_formats(raw: str) -> None:
-    assert normalize_jid(raw) == "5491100000000@s.whatsapp.net"
+    assert normalize_jid(raw) == "15550100000@s.whatsapp.net"
 
 
 def test_normalize_jid_already_a_dm_jid() -> None:
-    assert (
-        normalize_jid("5491100000000@s.whatsapp.net")
-        == "5491100000000@s.whatsapp.net"
-    )
+    assert normalize_jid("15550100000@s.whatsapp.net") == "15550100000@s.whatsapp.net"
 
 
 def test_normalize_jid_jid_is_lowercased_and_stripped() -> None:
@@ -56,7 +53,7 @@ def test_normalize_jid_invalid_raises(raw: str) -> None:
 # pretty_phone
 # --------------------------------------------------------------------------- #
 def test_pretty_phone_dm_jid() -> None:
-    assert pretty_phone("5491100000000@s.whatsapp.net") == "+5491100000000"
+    assert pretty_phone("15550100000@s.whatsapp.net") == "+15550100000"
 
 
 def test_pretty_phone_group_jid_unchanged() -> None:
@@ -69,15 +66,15 @@ def test_pretty_phone_group_jid_unchanged() -> None:
 # --------------------------------------------------------------------------- #
 def test_set_returns_jid_and_stores_stripped_name(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    jid = book.set("+54 9 11 0000-0000", "  Lucio  ")
-    assert jid == "5491100000000@s.whatsapp.net"
-    assert book.name_for(jid) == "Lucio"
+    jid = book.set("+1 555 010-0000", "  Sample Contact  ")
+    assert jid == "15550100000@s.whatsapp.net"
+    assert book.name_for(jid) == "Sample Contact"
 
 
 def test_set_empty_name_raises(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
     with pytest.raises(ValueError):
-        book.set("5491100000000", "   ")
+        book.set("15550100000", "   ")
 
 
 def test_name_for_unknown_jid_returns_none(tmp_path: Path) -> None:
@@ -90,38 +87,38 @@ def test_name_for_unknown_jid_returns_none(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 def test_find_exact_name_case_insensitive(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    jid = book.set("5491100000000", "Lucio")
-    assert book.find("lucio") == jid
+    jid = book.set("15550100000", "Sample Contact")
+    assert book.find("SAMPLE CONTACT") == jid
 
 
 def test_find_unique_substring(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    jid = book.set("5491100000000", "Lucio Pérez")
-    assert book.find("pérez") == jid
+    jid = book.set("15550100000", "Sample Contact")
+    assert book.find("contact") == jid
 
 
 def test_find_ambiguous_substring_returns_none(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    book.set("5491111111111", "Lucio Uno")
-    book.set("5492222222222", "Lucio Dos")
-    assert book.find("lucio") is None
+    book.set("15550100001", "Sample One")
+    book.set("15550100002", "Sample Two")
+    assert book.find("sample") is None
 
 
 def test_find_by_jid(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    jid = book.set("5491100000000", "Lucio")
-    assert book.find("5491100000000@s.whatsapp.net") == jid
+    jid = book.set("15550100000", "Sample Contact")
+    assert book.find("15550100000@s.whatsapp.net") == jid
 
 
 def test_find_by_number(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    jid = book.set("5491100000000", "Lucio")
-    assert book.find("+54 9 11 0000-0000") == jid
+    jid = book.set("15550100000", "Sample Contact")
+    assert book.find("+1 555 010-0000") == jid
 
 
 def test_find_no_match_returns_none(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    book.set("5491100000000", "Lucio")
+    book.set("15550100000", "Sample Contact")
     assert book.find("nobody") is None
 
 
@@ -131,8 +128,8 @@ def test_find_no_match_returns_none(tmp_path: Path) -> None:
 def test_remove_by_name_case_insensitive(tmp_path: Path) -> None:
     path = tmp_path / "contacts.json"
     book = ContactBook(path)
-    jid = book.set("5491100000000", "Lucio")
-    assert book.remove("LUCIO") is True
+    jid = book.set("15550100000", "Sample Contact")
+    assert book.remove("SAMPLE CONTACT") is True
     assert book.name_for(jid) is None
     # Persisted: a fresh book sees the deletion.
     assert ContactBook(path).items() == {}
@@ -140,16 +137,16 @@ def test_remove_by_name_case_insensitive(tmp_path: Path) -> None:
 
 def test_remove_by_number(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    book.set("5491100000000", "Lucio")
-    assert book.remove("+54 9 11 0000-0000") is True
+    book.set("15550100000", "Sample Contact")
+    assert book.remove("+1 555 010-0000") is True
     assert book.items() == {}
 
 
 def test_remove_no_match_returns_false(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    book.set("5491100000000", "Lucio")
+    book.set("15550100000", "Sample Contact")
     assert book.remove("nobody") is False
-    assert book.items() == {"5491100000000@s.whatsapp.net": "Lucio"}
+    assert book.items() == {"15550100000@s.whatsapp.net": "Sample Contact"}
 
 
 # --------------------------------------------------------------------------- #
@@ -158,12 +155,12 @@ def test_remove_no_match_returns_false(tmp_path: Path) -> None:
 def test_persistence_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "contacts.json"
     book = ContactBook(path)
-    jid = book.set("5491100000000", "Lucio")
+    jid = book.set("15550100000", "Sample Contact")
     assert path.exists()
 
     reloaded = ContactBook(path)
-    assert reloaded.items() == {jid: "Lucio"}
-    assert reloaded.name_for(jid) == "Lucio"
+    assert reloaded.items() == {jid: "Sample Contact"}
+    assert reloaded.name_for(jid) == "Sample Contact"
 
 
 def test_missing_file_starts_empty(tmp_path: Path) -> None:
@@ -177,13 +174,13 @@ def test_corrupt_file_starts_empty(tmp_path: Path) -> None:
     book = ContactBook(path)
     assert book.items() == {}
     # The book still works and overwrites the corrupt file cleanly.
-    jid = book.set("5491100000000", "Lucio")
-    assert ContactBook(path).items() == {jid: "Lucio"}
+    jid = book.set("15550100000", "Sample Contact")
+    assert ContactBook(path).items() == {jid: "Sample Contact"}
 
 
 def test_items_returns_a_copy(tmp_path: Path) -> None:
     book = ContactBook(tmp_path / "contacts.json")
-    jid = book.set("5491100000000", "Lucio")
+    jid = book.set("15550100000", "Sample Contact")
     snapshot = book.items()
     snapshot["bogus@s.whatsapp.net"] = "Mutated"
-    assert book.items() == {jid: "Lucio"}
+    assert book.items() == {jid: "Sample Contact"}

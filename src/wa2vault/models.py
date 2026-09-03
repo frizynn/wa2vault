@@ -5,14 +5,13 @@ that flows through the whole pipeline:
 
     data access (wacli JSON)  ->  transcription  ->  Markdown renderer
 
-Every layer reads and writes ``MessageRecord`` instances. Phase-2 modules
-(the wacli data-access adapter, the transcriber, and the renderer) MUST code
-against this contract and not against raw wacli JSON, so that the wacli
-payload shape is contained to a single adapter.
+Every layer reads and writes ``MessageRecord`` instances. The wacli adapter,
+transcriber, archive, and renderer code against this contract rather than raw
+wacli JSON, keeping the upstream payload shape at one boundary.
 
-The original wacli JSON object for each message is preserved verbatim in
-:attr:`MessageRecord.raw` so that no information is lost during normalization
-and adapters can be extended without changing this contract.
+The original wacli object is available transiently in ``MessageRecord.raw`` for
+media metadata and adapter evolution. ``ArchiveStore`` deliberately excludes
+it from durable persistence.
 """
 
 from __future__ import annotations
@@ -71,8 +70,7 @@ class MessageRecord(BaseModel):
     )
     chat_jid: str = Field(
         description=(
-            "JID of the chat this message belongs to "
-            "(e.g. '123@s.whatsapp.net' or '...@g.us')."
+            "JID of the chat this message belongs to (e.g. '123@s.whatsapp.net' or '...@g.us')."
         )
     )
     chat_name: str | None = Field(
@@ -124,8 +122,7 @@ class MessageRecord(BaseModel):
     transcript: str | None = Field(
         default=None,
         description=(
-            "Local ASR transcript of a voice note / audio. "
-            "Populated by the transcription layer."
+            "Local ASR transcript of a voice note / audio. Populated by the transcription layer."
         ),
     )
     reply_to_id: str | None = Field(

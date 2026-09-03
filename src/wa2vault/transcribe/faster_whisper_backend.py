@@ -46,11 +46,13 @@ class FasterWhisperTranscriber(Transcriber):
         device: str = "cpu",
         compute_type: str = "int8",
         language: str = "es",
+        ffmpeg_timeout: float = 120.0,
     ) -> None:
         self.model = model
         self.device = device
         self.compute_type = compute_type
         self.language = language
+        self.ffmpeg_timeout = ffmpeg_timeout
         self._whisper_model: WhisperModel | None = None
 
     def _get_model(self) -> WhisperModel:
@@ -96,14 +98,10 @@ class FasterWhisperTranscriber(Transcriber):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             wav_path = Path(tmp.name)
         try:
-            self._decode_to_wav(audio_path, wav_path)
+            self._decode_to_wav(audio_path, wav_path, timeout=self.ffmpeg_timeout)
             model = self._get_model()
             segments, info = model.transcribe(str(wav_path), language=language)
-            text = " ".join(
-                stripped
-                for segment in segments
-                if (stripped := segment.text.strip())
-            )
+            text = " ".join(stripped for segment in segments if (stripped := segment.text.strip()))
         finally:
             wav_path.unlink(missing_ok=True)
 
@@ -116,7 +114,7 @@ class FasterWhisperTranscriber(Transcriber):
         )
 
     @staticmethod
-    def _decode_to_wav(audio_path: Path, wav_path: Path) -> None:
+    def _decode_to_wav(audio_path: Path, wav_path: Path, *, timeout: float = 120.0) -> None:
         """Decode ``audio_path`` to 16 kHz mono PCM WAV at ``wav_path``.
 
         Args:
@@ -144,12 +142,15 @@ class FasterWhisperTranscriber(Transcriber):
                 command,
                 capture_output=True,
                 text=True,
+                timeout=timeout,
                 check=False,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
                 "ffmpeg is required to decode audio but was not found on PATH."
             ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"ffmpeg timed out after {timeout:g}s") from exc
 
         if result.returncode != 0:
             raise RuntimeError(

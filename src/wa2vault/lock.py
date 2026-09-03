@@ -23,10 +23,9 @@ remains the correctness backstop.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-
-import platformdirs
 
 from wa2vault.config import Config
 
@@ -67,10 +66,25 @@ def store_dir(config: Config) -> Path:
     """
     if config.wacli_db is not None:
         return Path(config.wacli_db)
+    base = _default_wacli_base_dir()
+    if config.wacli_account is not None:
+        # This is wacli's default for named accounts. If the account registry
+        # points elsewhere, wacli's own exclusive lock remains the backstop.
+        return base / "accounts" / config.wacli_account
     env = os.environ.get("WACLI_STORE_DIR")
     if env:
         return Path(env).expanduser()
-    return Path(platformdirs.user_state_dir("wacli"))
+    return base
+
+
+def _default_wacli_base_dir() -> Path:
+    """Mirror wacli's defaults (XDG state on Linux, ``~/.wacli`` elsewhere)."""
+    if sys.platform.startswith("linux"):
+        xdg_state = os.environ.get("XDG_STATE_HOME")
+        if xdg_state and Path(xdg_state).is_absolute():
+            return Path(xdg_state) / "wacli"
+        return Path.home() / ".local" / "state" / "wacli"
+    return Path.home() / ".wacli"
 
 
 def _pid_alive(pid: int) -> bool:

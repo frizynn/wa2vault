@@ -12,15 +12,21 @@ the whole cache in one self-contained, easy-to-inspect file.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from wa2vault.fs import PRIVATE_FILE_MODE, ensure_private_dir
 
 if TYPE_CHECKING:
     from wa2vault.transcribe.base import TranscriptResult
 
 #: Default file name for the cache inside ``Config.cache_dir``.
 CACHE_FILENAME = "transcripts.sqlite3"
+CACHE_KEY_SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS transcripts (
@@ -52,16 +58,22 @@ class TranscriptCache:
             cache_dir: Directory that holds the cache file. Created with parents
                 if it does not exist.
         """
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(cache_dir)
         self.path = cache_dir / CACHE_FILENAME
         with self._connect() as conn:
             conn.execute(_SCHEMA)
+        try:
+            self.path.chmod(PRIVATE_FILE_MODE)
+        except OSError:
+            pass
 
     def _connect(self) -> sqlite3.Connection:
         """Open a connection to the cache database."""
-        return sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.execute("PRAGMA busy_timeout = 30000")
+        return connection
 
-    def get(self, key: str) -> str | None:
+    def get(self, key: str | TranscriptCacheKey) -> str | None:
         """Return the cached transcript text for ``key``, or ``None`` if absent.
 
         Args:
@@ -73,11 +85,11 @@ class TranscriptCache:
         """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT text FROM transcripts WHERE key = ?", (key,)
+                "SELECT text FROM transcripts WHERE key = ?", (_key_value(key),)
             ).fetchone()
         return row[0] if row is not None else None
 
-    def set(self, key: str, result: TranscriptResult) -> None:
+    def set(self, key: str | TranscriptCacheKey, result: TranscriptResult) -> None:
         """Store ``result`` under ``key``, replacing any existing entry.
 
         Args:
@@ -89,7 +101,7 @@ class TranscriptCache:
                 "INSERT OR REPLACE INTO transcripts "
                 "(key, text, language, duration_s, backend) VALUES (?, ?, ?, ?, ?)",
                 (
-                    key,
+                    _key_value(key),
                     result.text,
                     result.language,
                     result.duration_s,
@@ -98,4 +110,58 @@ class TranscriptCache:
             )
 
 
-__all__ = ["TranscriptCache", "CACHE_FILENAME"]
+@dataclass(frozen=True)
+class TranscriptCacheKey:
+    """Every input that can change a transcription result."""
+
+    profile: str
+    chat_jid: str
+    message_id: str
+    backend: str
+    model: str
+    language: str
+    media_digest: str
+    schema_version: int = CACHE_KEY_SCHEMA_VERSION
+
+    @classmethod
+    def from_media(
+        cls,
+        *,
+        profile: str,
+        chat_jid: str,
+        message_id: str,
+        backend: str,
+        model: str,
+        language: str,
+        media_path: Path,
+    ) -> TranscriptCacheKey:
+        digest = hashlib.sha256()
+        with media_path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return cls(
+            profile=profile,
+            chat_jid=chat_jid,
+            message_id=message_id,
+            backend=backend,
+            model=model,
+            language=language,
+            media_digest=digest.hexdigest(),
+        )
+
+    @property
+    def value(self) -> str:
+        payload = json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _key_value(key: str | TranscriptCacheKey) -> str:
+    return key.value if isinstance(key, TranscriptCacheKey) else key
+
+
+__all__ = [
+    "CACHE_FILENAME",
+    "CACHE_KEY_SCHEMA_VERSION",
+    "TranscriptCache",
+    "TranscriptCacheKey",
+]

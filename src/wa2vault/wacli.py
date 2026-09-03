@@ -1,81 +1,15 @@
-"""Thin client around the external ``wacli`` binary.
+"""Canonical adapter for the external ``wacli`` process and JSON contract.
 
-wa2vault never talks to WhatsApp directly; it shells out to ``wacli``
-(github.com/openclaw/wacli), which mirrors a linked WhatsApp Web device into a
-local SQLite store and exposes JSON output on every command.
-
-This module centralizes process invocation so the rest of wa2vault deals with
-parsed JSON, not subprocess plumbing. Read/query commands run with wacli's
-read-only guard (``--read-only`` / ``WACLI_READONLY=1``) as defense-in-depth.
-That guard rejects ANY command that writes WhatsApp *or the local store*, so
-``sync_once`` -- which must mirror messages into the local store -- runs with
-the guard OFF. wa2vault's never-send guarantee does not depend on the guard:
-this client exposes no send/presence command (only sync, read, and media
-download), so it cannot message anyone.
-
-wacli store location
---------------------
-wacli stores its SQLite DB and downloaded media in a single "store directory".
-By default this is the platform state dir; on Linux that is the XDG state dir,
-``~/.local/state/wacli`` (confirmed via ``wacli doctor --json`` ->
-``data.store_dir``). It can be overridden with the ``--store`` flag or the
-``WACLI_STORE_DIR`` environment variable; wa2vault threads ``Config.wacli_db``
-through as ``--store`` when set.
-
-Discovered wacli interface (v0.11.0)
-------------------------------------
-The data layer below was reverse-engineered from ``wacli --help`` /
-``<cmd> --help``, the project docs (``docs/messages.md``, ``docs/media.md``),
-and the ``openclaw/wacli`` Go source (``internal/store/types.go`` for the JSON
-shapes), because the machine is not paired yet (no live data). All assumptions
-are coded defensively and should be re-validated after pairing.
-
-Commands and flags used (read commands run after ``--read-only --json
-[--store …]``; ``sync`` omits ``--read-only``):
-
-* ``sync --once`` -- one-shot sync: keeps syncing until idle (~30s) and exits.
-  ``--follow`` defaults to true, so ``--once`` is required to make it terminate.
-  Run WITHOUT the read-only guard: ``sync`` writes mirrored messages into the
-  local store, which ``--read-only`` rejects. Returns an implementation-defined
-  summary object; counts are surfaced when present.
-* ``chats list --limit N`` -- ``data`` is a JSON array of chat objects (or
-  ``null`` when empty). Backs :meth:`list_chats` / :meth:`resolve_chat`.
-* ``messages export --chat JID [--after T] [--before T] [--limit N]`` -- ``data``
-  is ``{"messages": [<message>] | null, "fts": bool}``, ordered oldest-first.
-  ``--after`` / ``--before`` accept RFC3339 or ``YYYY-MM-DD``. We pass the time
-  window through *and* re-filter in Python so the returned window is exact.
-* ``media download --chat JID --id MSG_ID --output PATH`` -- with the global
-  ``--read-only`` guard the ``--output`` flag is mandatory (wacli refuses to
-  write into the store DB in read-only mode). Returns
-  ``{chat, id, path, bytes, media_type, mime_type, downloaded, read_only,
-  recorded}``. Expired/unavailable media (404 on WhatsApp's CDN) makes wacli
-  exit non-zero, surfaced here as :class:`WacliError` and handled gracefully.
-
-Message JSON shape (``store.Message``; Go serializes most fields by their
-PascalCase Go name, so keys are PascalCase unless an explicit ``json:`` tag
-exists). Fields we read (all optional / accessed via ``.get``):
-
-* ``MsgID`` -- WhatsApp message id (NOT ``id``).
-* ``ChatJID`` / ``ChatName``.
-* ``SenderJID`` / ``SenderName``.
-* ``Timestamp`` -- RFC3339 string (Go ``time.Time``); may carry an offset.
-* ``FromMe`` -- bool.
-* ``Text`` -- raw body; ``DisplayText`` -- render-ready body (preferred).
-* ``MediaCaption`` -- caption attached to media.
-* ``MediaType`` -- ``"image"``, ``"video"``, ``"audio"``, ``"ptt"``,
-  ``"document"``, ``"sticker"``, ``"gif"``, … (empty for plain text).
-* ``MimeType`` / ``Filename`` / ``LocalPath`` -- media metadata; ``LocalPath`` is
-  only populated by a prior *writable* download.
-* ``QuotedMsgID`` (json tag ``quoted_msg_id``) -- id of the quoted message.
-
-Chat JSON shape (``store.Chat``; explicit snake_case json tags):
-``{jid, kind, name, last_message_ts, archived, pinned, muted_until, unread,
-unread_count}`` where ``kind`` is one of ``dm``/``group``/``newsletter``/
-``broadcast``/``unknown``.
+All subprocess construction, account/store selection, read-only enforcement,
+timeouts, and payload normalization live here. The rest of wa2vault works with
+``ChatRef``, ``MediaResult``, and ``MessageRecord`` instead of wacli-specific
+commands or JSON shapes. See ``docs/internals/wacli-contract.md`` for the
+supported command and field contract.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -87,11 +21,22 @@ from pathlib import Path
 from typing import Any
 
 from wa2vault.config import Config
+from wa2vault.fs import ensure_private_dir
+from wa2vault.identity import chat_key
 from wa2vault.models import ChatType, MessageKind, MessageRecord
 
 
 class WacliError(RuntimeError):
     """Raised when a wacli invocation fails or its output cannot be parsed."""
+
+
+class WacliTimeoutError(WacliError):
+    """Raised when a bounded wacli process exceeds its deadline."""
+
+    def __init__(self, operation: str, timeout: float) -> None:
+        self.operation = operation
+        self.timeout = timeout
+        super().__init__(f"wacli {operation} timed out after {timeout:g}s")
 
 
 class ChatNotFound(WacliError):
@@ -111,9 +56,7 @@ class ChatNotUnique(WacliError):
         self.query = query
         self.candidates = candidates
         listed = ", ".join(f"{c.name or '(unnamed)'} <{c.jid}>" for c in candidates)
-        super().__init__(
-            f"Chat query {query!r} is ambiguous; {len(candidates)} matches: {listed}"
-        )
+        super().__init__(f"Chat query {query!r} is ambiguous; {len(candidates)} matches: {listed}")
 
 
 @dataclass(frozen=True)
@@ -190,18 +133,22 @@ class WacliClient:
     # ------------------------------------------------------------------ #
     # Process plumbing
     # ------------------------------------------------------------------ #
-    def _base_args(self, *, read_only: bool = True) -> list[str]:
+    def _base_args(self, *, read_only: bool = True, json_output: bool = True) -> list[str]:
         """Build the leading argv shared by every invocation (binary + globals).
 
         ``read_only`` adds wacli's ``--read-only`` guard. It must be False for
         commands that legitimately write the local store (e.g. ``sync``), which
         the guard would otherwise reject.
         """
-        args = [self.config.wacli_bin, "--json"]
+        args = [self.config.wacli_bin]
+        if json_output:
+            args.append("--json")
         if read_only:
             args.append("--read-only")
         if self.config.wacli_db is not None:
             args += ["--store", str(self.config.wacli_db)]
+        elif self.config.wacli_account is not None:
+            args += ["--account", self.config.wacli_account]
         return args
 
     def _env(self, *, read_only: bool = True) -> dict[str, str]:
@@ -223,9 +170,7 @@ class WacliClient:
                 "Install it (see the wa2vault README) or set 'wacli_bin' in the config."
             )
 
-    def run_json(
-        self, *args: str, read_only: bool = True, timeout: float | None = None
-    ) -> Any:
+    def run_json(self, *args: str, read_only: bool = True, timeout: float | None = None) -> Any:
         """Run a wacli subcommand and return its parsed JSON payload.
 
         wacli wraps successful JSON output as
@@ -244,6 +189,7 @@ class WacliClient:
             The decoded ``data`` field of the wacli JSON envelope.
         """
         self.ensure_available()
+        effective_timeout = timeout if timeout is not None else self.config.command_timeout
         argv = self._base_args(read_only=read_only) + list(args)
         try:
             proc = subprocess.run(
@@ -251,21 +197,17 @@ class WacliClient:
                 capture_output=True,
                 text=True,
                 env=self._env(read_only=read_only),
-                timeout=timeout,
+                timeout=effective_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise WacliError(
-                f"wacli {' '.join(args)} timed out after {timeout:g}s"
-            ) from exc
+            raise WacliTimeoutError(" ".join(args), effective_timeout) from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise WacliError(f"Failed to run wacli: {exc}") from exc
 
         if proc.returncode != 0:
             detail = proc.stderr.strip() or proc.stdout.strip()
-            raise WacliError(
-                f"wacli {' '.join(args)} exited with {proc.returncode}: {detail}"
-            )
+            raise WacliError(f"wacli {' '.join(args)} exited with {proc.returncode}: {detail}")
 
         try:
             payload = json.loads(proc.stdout)
@@ -279,6 +221,28 @@ class WacliClient:
                 raise WacliError(f"wacli reported an error: {payload.get('error')!r}")
             return payload.get("data")
         return payload
+
+    def run_passthrough(
+        self,
+        *args: str,
+        read_only: bool,
+        timeout: float | None,
+    ) -> int:
+        """Run an interactive/plain-text wacli command on the current terminal."""
+        self.ensure_available()
+        argv = self._base_args(read_only=read_only, json_output=False) + list(args)
+        try:
+            process = subprocess.run(
+                argv,
+                env=self._env(read_only=read_only),
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise WacliTimeoutError(" ".join(args), float(exc.timeout)) from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise WacliError(f"Failed to run wacli: {exc}") from exc
+        return process.returncode
 
     # ------------------------------------------------------------------ #
     # Implemented commands
@@ -302,9 +266,7 @@ class WacliClient:
             return data
         if isinstance(data, dict) and isinstance(data.get("chats"), list):
             return data["chats"]
-        raise WacliError(
-            f"Unexpected 'chats list' payload shape: {type(data).__name__}"
-        )
+        raise WacliError(f"Unexpected 'chats list' payload shape: {type(data).__name__}")
 
     def list_groups(self, limit: int = 500) -> list[dict[str, Any]]:
         """Return joined groups via ``wacli groups list --json``.
@@ -334,9 +296,7 @@ class WacliClient:
             return data
         if isinstance(data, dict) and isinstance(data.get("groups"), list):
             return data["groups"]
-        raise WacliError(
-            f"Unexpected 'groups list' payload shape: {type(data).__name__}"
-        )
+        raise WacliError(f"Unexpected 'groups list' payload shape: {type(data).__name__}")
 
     def group_names(self, limit: int = 500) -> dict[str, str]:
         """Map group JID -> subject for groups that have a real (non-placeholder) name.
@@ -365,7 +325,7 @@ class WacliClient:
         never-send guarantee is unaffected (this client exposes no send command).
 
         Args:
-            timeout: Max seconds to wait for the refresh. None waits indefinitely.
+            timeout: Max seconds to wait; None uses ``config.command_timeout``.
 
         Returns:
             A concise summary dict (counts surfaced verbatim when wacli reports
@@ -374,9 +334,7 @@ class WacliClient:
         data = self.run_json("groups", "refresh", read_only=False, timeout=timeout)
         return self._summarize_sync(data)
 
-    def sync_once(
-        self, *, full: bool = False, timeout: float | None = None
-    ) -> dict[str, Any]:
+    def sync_once(self, *, full: bool = False, timeout: float | None = None) -> dict[str, Any]:
         """Run a one-shot sync of the local store via ``wacli sync --once``.
 
         ``wacli sync`` follows the stream indefinitely by default; ``--once``
@@ -392,7 +350,7 @@ class WacliClient:
             full: When True, also download media in the background during the
                 sync (``--download-media``). When False, only message metadata
                 is mirrored and media is fetched lazily by :meth:`ensure_media`.
-            timeout: Max seconds to wait for the sync. None waits indefinitely.
+            timeout: Max seconds to wait; None uses ``config.command_timeout``.
 
         Returns:
             A concise summary dict. wacli's exact ``sync`` payload is not pinned
@@ -584,6 +542,8 @@ class WacliClient:
             return MediaResult(path=None)
 
         target = self._media_target(record)
+        if target.is_file() and target.stat().st_size > 0:
+            return MediaResult(path=target)
         try:
             data = self.run_json(
                 "media",
@@ -594,6 +554,7 @@ class WacliClient:
                 record.id,
                 "--output",
                 str(target),
+                timeout=self.config.media_timeout,
             )
         except WacliError as exc:
             # Media lost on WhatsApp's CDN (404/410) cannot be re-downloaded;
@@ -606,10 +567,14 @@ class WacliClient:
 
     def _media_target(self, record: MessageRecord) -> Path:
         """Compute the local output path for a message's downloaded media."""
-        media_dir = self.config.cache_dir / "media"
-        media_dir.mkdir(parents=True, exist_ok=True)
+        media_dir = (
+            self.config.profile_cache_dir
+            / "media"
+            / chat_key(self.config.profile, record.chat_jid, record.chat_name)
+        )
+        ensure_private_dir(media_dir)
         suffix = _media_suffix(record)
-        safe_id = record.id.replace("/", "_").replace("\\", "_")
+        safe_id = hashlib.sha256(record.id.encode("utf-8")).hexdigest()[:20]
         return media_dir / f"{safe_id}{suffix}"
 
     # ------------------------------------------------------------------ #
@@ -626,14 +591,10 @@ class WacliClient:
                 return []
             if isinstance(messages, list):
                 return [m for m in messages if isinstance(m, dict)]
-            raise WacliError(
-                f"Unexpected 'messages' field type: {type(messages).__name__}"
-            )
+            raise WacliError(f"Unexpected 'messages' field type: {type(messages).__name__}")
         if isinstance(data, list):
             return [m for m in data if isinstance(m, dict)]
-        raise WacliError(
-            f"Unexpected 'messages export' payload shape: {type(data).__name__}"
-        )
+        raise WacliError(f"Unexpected 'messages export' payload shape: {type(data).__name__}")
 
     @classmethod
     def _chat_ref(cls, raw: dict[str, Any]) -> ChatRef | None:
@@ -655,9 +616,7 @@ class WacliClient:
         """
         msg_id = _first_str(raw, "MsgID", "msg_id", "id", "ID")
         chat_jid = _first_str(raw, "ChatJID", "chat_jid", "jid")
-        timestamp = _parse_timestamp(
-            _first_value(raw, "Timestamp", "timestamp", "ts", "Ts")
-        )
+        timestamp = _parse_timestamp(_first_value(raw, "Timestamp", "timestamp", "ts", "Ts"))
         if not msg_id or not chat_jid or timestamp is None:
             return None
 
@@ -899,6 +858,7 @@ def _first_str(raw: dict[str, Any], *keys: str) -> str | None:
 __all__ = [
     "WacliClient",
     "WacliError",
+    "WacliTimeoutError",
     "ChatRef",
     "MediaResult",
     "ChatNotFound",

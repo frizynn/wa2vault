@@ -4,26 +4,71 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
 
-      - name: Install Python 3.12
-        run: uv python install 3.12
+      - name: Install Python
+        run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync
+      - name: Install locked dependencies
+        run: uv sync --locked --python ${{ matrix.python-version }}
 
-      - name: Lint
-        run: uv run ruff check .
+      - name: Check formatting and lint
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
 
-      - name: Test
+      - name: Lint Markdown
+        if: matrix.python-version == '3.12'
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: |
+            README.md
+            CHANGELOG.md
+            SECURITY.md
+            CONTRIBUTING.md
+            docs/**/*.md
+            skills/**/*.md
+
+      - name: Test with branch coverage
+        if: matrix.python-version == '3.12'
+        run: uv run pytest --cov=wa2vault --cov-report=term-missing --cov-fail-under=80
+
+      - name: Test supported Python
+        if: matrix.python-version != '3.12'
         run: uv run pytest
+
+      - name: Build distributions
+        if: matrix.python-version == '3.12'
+        run: uv build
+
+      - name: Smoke-test built wheel
+        if: matrix.python-version == '3.12'
+        run: |
+          uv venv "$RUNNER_TEMP/wa2vault-smoke" --python ${{ matrix.python-version }}
+          uv pip install --python "$RUNNER_TEMP/wa2vault-smoke/bin/python" dist/*.whl
+          "$RUNNER_TEMP/wa2vault-smoke/bin/wa2vault" --help
+        shell: bash

@@ -50,9 +50,7 @@ class FakeWacliClient:
         # being callable lets it act as the constructor too.
         return self
 
-    def sync_once(
-        self, *, full: bool = False, timeout: float | None = None
-    ) -> dict[str, object]:
+    def sync_once(self, *, full: bool = False, timeout: float | None = None) -> dict[str, object]:
         self.sync_calls += 1
         self.sync_timeout = timeout
         if self.sync_error is not None:
@@ -137,6 +135,7 @@ def fake_setup(tmp_path: Path) -> tuple[Config, ChatRef, list[MessageRecord], di
         vault_dir=vault_dir,
         output_subdir="Chats",
         cache_dir=cache_dir,
+        state_dir=tmp_path / "state",
         language="es",
     )
 
@@ -190,7 +189,8 @@ def test_pull_chat_writes_note_and_copies_image(
 
     # The note exists under vault_dir/output_subdir/.
     note_dir = config.vault_dir / config.output_subdir
-    assert result.note_path == note_dir / "family.md"
+    assert result.note_path.parent == note_dir / config.profile_key
+    assert result.note_path.name.startswith("family--")
     assert result.note_path.exists()
 
     content = result.note_path.read_text(encoding="utf-8")
@@ -200,9 +200,11 @@ def test_pull_chat_writes_note_and_copies_image(
 
     # The image was copied into _media/<slug>/ and embedded with a
     # VAULT-RELATIVE path (not the absolute source path).
-    copied = note_dir / "_media" / "family" / "photo.jpg"
+    copied_files = list(note_dir.rglob("*.jpg"))
+    assert len(copied_files) == 1
+    copied = copied_files[0]
     assert copied.exists()
-    assert "![[Chats/_media/family/photo.jpg]]" in content
+    assert f"![[{copied.relative_to(config.vault_dir)}]]" in content
     assert str(config.vault_dir) not in content  # no absolute path leaked
 
     # PullResult counts.
@@ -309,7 +311,12 @@ def test_pull_chat_copies_document_and_links_it(
 ) -> None:
     """A document attachment is copied into the vault and linked from the note."""
     vault_dir = tmp_path / "vault"
-    config = Config(vault_dir=vault_dir, output_subdir="Chats", cache_dir=tmp_path / "cache")
+    config = Config(
+        vault_dir=vault_dir,
+        output_subdir="Chats",
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+    )
 
     source = tmp_path / "wacli_media"
     source.mkdir()
@@ -341,10 +348,12 @@ def test_pull_chat_copies_document_and_links_it(
     )
 
     # The PDF was copied under its readable original filename and linked.
-    copied = vault_dir / "Chats" / "_media" / "mi-grupo" / "Propuesta Piloto.pdf"
+    copied_files = list((vault_dir / "Chats").rglob("*.pdf"))
+    assert len(copied_files) == 1
+    copied = copied_files[0]
     assert copied.exists()
     content = result.note_path.read_text(encoding="utf-8")
-    assert "[[Chats/_media/mi-grupo/Propuesta Piloto.pdf]]" in content
+    assert f"[[{copied.relative_to(vault_dir)}]]" in content
     assert "*[documento]*" not in content
 
 
@@ -353,7 +362,12 @@ def test_pull_chat_flags_expired_audio_explicitly(
 ) -> None:
     """Audio whose media expired on the CDN renders as 'expired', not a bare bug."""
     vault_dir = tmp_path / "vault"
-    config = Config(vault_dir=vault_dir, output_subdir="Chats", cache_dir=tmp_path / "cache")
+    config = Config(
+        vault_dir=vault_dir,
+        output_subdir="Chats",
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+    )
 
     chatref = ChatRef(jid="123@s.whatsapp.net", name="Family", chat_type="dm")
     records = [
@@ -392,9 +406,7 @@ def test_pull_chat_without_media_renders_image_unavailable(
     fake_setup: tuple[Config, ChatRef, list[MessageRecord], dict[str, Path]],
 ) -> None:
     config, chatref, records, media_files = fake_setup
-    _install_fake_client(
-        monkeypatch, chatref=chatref, records=records, media_files=media_files
-    )
+    _install_fake_client(monkeypatch, chatref=chatref, records=records, media_files=media_files)
 
     result = pipeline.pull_chat(
         config=config,
@@ -409,7 +421,143 @@ def test_pull_chat_without_media_renders_image_unavailable(
     # not embedded or copied.
     assert "*(imagen no disponible)*" in content
     assert "![[" not in content
-    assert not (config.vault_dir / config.output_subdir / "_media").exists()
+    assert not any(
+        path.name == "_media" for path in (config.vault_dir / config.output_subdir).rglob("_media")
+    )
 
     assert result.images_count == 0
     assert result.message_count == 4
+
+
+def test_pull_is_monotonic_across_overlapping_and_shrinking_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A later short export must not replace a previously complete archive."""
+    config = Config(
+        vault_dir=tmp_path / "vault",
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+    )
+    chatref = ChatRef(
+        jid="15550100001@s.whatsapp.net",
+        name="Example contact",
+        chat_type="dm",
+    )
+    initial = [
+        MessageRecord(
+            id=f"m{index}",
+            chat_jid=chatref.jid,
+            chat_type="dm",
+            timestamp=datetime(2026, 1, 1, index, tzinfo=UTC),
+            from_me=False,
+            kind="text",
+            text=f"message {index}",
+        )
+        for index in (1, 2, 3)
+    ]
+    fake = _install_fake_client(monkeypatch, chatref=chatref, records=initial, media_files={})
+
+    first = pipeline.pull_chat(config=config, chat=chatref.jid, days=30, transcribe=False)
+    fake._records = [initial[-1]]
+    second = pipeline.pull_chat(config=config, chat=chatref.jid, days=1, transcribe=False)
+
+    assert first.note_path == second.note_path
+    assert second.message_count == 3
+    content = second.note_path.read_text(encoding="utf-8")
+    assert all(f"message {index}" in content for index in (1, 2, 3))
+
+
+def test_profiles_with_identical_remote_ids_write_disjoint_archives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    common = dict(
+        vault_dir=vault,
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+    )
+    chatref = ChatRef(
+        jid="15550100001@s.whatsapp.net",
+        name="Same title",
+        chat_type="dm",
+    )
+    personal = MessageRecord(
+        id="same-message-id",
+        chat_jid=chatref.jid,
+        chat_type="dm",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        from_me=False,
+        kind="text",
+        text="personal-only marker",
+    )
+    work = personal.model_copy(update={"text": "work-only marker"})
+    fake = _install_fake_client(monkeypatch, chatref=chatref, records=[personal], media_files={})
+
+    personal_result = pipeline.pull_chat(
+        config=Config(profile="personal", **common),
+        chat=chatref.jid,
+        days=30,
+        transcribe=False,
+    )
+    fake._records = [work]
+    work_result = pipeline.pull_chat(
+        config=Config(profile="work", **common),
+        chat=chatref.jid,
+        days=30,
+        transcribe=False,
+    )
+
+    assert personal_result.note_path != work_result.note_path
+    assert "personal-only marker" in personal_result.note_path.read_text(encoding="utf-8")
+    assert "work-only marker" not in personal_result.note_path.read_text(encoding="utf-8")
+    assert "work-only marker" in work_result.note_path.read_text(encoding="utf-8")
+
+
+def test_attachment_names_are_stable_and_message_collision_resistant(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "vault"
+    config = Config(
+        profile="work",
+        vault_dir=vault,
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+    )
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    first_source = source_dir / "one" / "report.pdf"
+    second_source = source_dir / "two" / "report.pdf"
+    first_source.parent.mkdir()
+    second_source.parent.mkdir()
+    first_source.write_bytes(b"first")
+    second_source.write_bytes(b"second")
+    chatref = ChatRef(jid="15550100002@s.whatsapp.net", name="Reports", chat_type="dm")
+    records = [
+        MessageRecord(
+            id=message_id,
+            chat_jid=chatref.jid,
+            chat_type="dm",
+            timestamp=datetime(2026, 1, 1, index, tzinfo=UTC),
+            from_me=False,
+            kind="document",
+            media_mime="application/pdf",
+            raw={"Filename": "report.pdf"},
+        )
+        for index, message_id in enumerate(("doc-one", "doc-two"), start=1)
+    ]
+    _install_fake_client(
+        monkeypatch,
+        chatref=chatref,
+        records=records,
+        media_files={"doc-one": first_source, "doc-two": second_source},
+    )
+
+    first = pipeline.pull_chat(config=config, chat=chatref.jid, days=30, transcribe=False)
+    copied = sorted((vault / "Chats").rglob("*.pdf"))
+    second = pipeline.pull_chat(config=config, chat=chatref.jid, days=30, transcribe=False)
+
+    assert len(copied) == 2
+    assert copied[0].name != copied[1].name
+    assert {path.read_bytes() for path in copied} == {b"first", b"second"}
+    assert first.note_path == second.note_path
+    assert sorted((vault / "Chats").rglob("*.pdf")) == copied

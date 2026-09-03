@@ -7,13 +7,11 @@ The public contract lives in :mod:`wa2vault.transcribe.base`:
 - :func:`~wa2vault.transcribe.base.get_transcriber` -- the factory that selects
   a concrete backend from a :class:`~wa2vault.config.Config`.
 
-Concrete backends:
+Concrete backend:
 
 - :class:`~wa2vault.transcribe.faster_whisper_backend.FasterWhisperTranscriber`
   -- the default CPU backend (faster-whisper / CTranslate2).
 
-The ``nemotron`` backend is a planned-but-unimplemented option: it is accepted
-by config validation, but :func:`get_transcriber` fails fast if it is selected.
 """
 
 from wa2vault.transcribe.base import (

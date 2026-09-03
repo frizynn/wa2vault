@@ -1,7 +1,7 @@
 """Unit tests for the wacli data-access layer.
 
 These tests exercise the pure JSON -> :class:`MessageRecord` mapper and the
-helpers around it with hand-crafted fixture dicts that mirror wacli v0.11.0's
+helpers around it with hand-crafted fixture dicts that mirror wacli v0.17.1's
 real ``messages export`` payload (PascalCase keys from Go's ``store.Message``,
 RFC3339 timestamps). They never invoke the wacli binary, so they run without a
 paired WhatsApp session.
@@ -37,10 +37,10 @@ from wa2vault.wacli import (
 # --------------------------------------------------------------------------- #
 def _text_message() -> dict:
     return {
-        "ChatJID": "5491111111111@s.whatsapp.net",
+        "ChatJID": "15550100001@s.whatsapp.net",
         "ChatName": "Alice",
         "MsgID": "TEXT0001",
-        "SenderJID": "5491111111111@s.whatsapp.net",
+        "SenderJID": "15550100001@s.whatsapp.net",
         "SenderName": "Alice",
         "Timestamp": "2026-06-01T15:30:00Z",
         "FromMe": False,
@@ -56,7 +56,7 @@ def _image_message() -> dict:
         "ChatJID": "120363000000000000@g.us",
         "ChatName": "Familia",
         "MsgID": "IMG0002",
-        "SenderJID": "5492222222222@s.whatsapp.net",
+        "SenderJID": "15550100002@s.whatsapp.net",
         "SenderName": "Bob",
         "Timestamp": "2026-06-02T09:00:00+00:00",
         "FromMe": True,
@@ -71,10 +71,10 @@ def _image_message() -> dict:
 
 def _ptt_message() -> dict:
     return {
-        "ChatJID": "5491111111111@s.whatsapp.net",
+        "ChatJID": "15550100001@s.whatsapp.net",
         "ChatName": "Alice",
         "MsgID": "PTT0003",
-        "SenderJID": "5491111111111@s.whatsapp.net",
+        "SenderJID": "15550100001@s.whatsapp.net",
         "SenderName": "Alice",
         "Timestamp": "2026-06-03T18:45:10Z",
         "FromMe": False,
@@ -132,11 +132,11 @@ def test_parse_text_message_field_mapping() -> None:
     record = WacliClient._parse_message(_text_message())
     assert isinstance(record, MessageRecord)
     assert record.id == "TEXT0001"
-    assert record.chat_jid == "5491111111111@s.whatsapp.net"
+    assert record.chat_jid == "15550100001@s.whatsapp.net"
     assert record.chat_name == "Alice"
     assert record.chat_type == "dm"
     assert record.from_me is False
-    assert record.sender_jid == "5491111111111@s.whatsapp.net"
+    assert record.sender_jid == "15550100001@s.whatsapp.net"
     assert record.sender_name == "Alice"
     assert record.kind == "text"
     assert record.text == "hola, cómo va?"
@@ -256,7 +256,7 @@ def test_parse_message_tolerates_missing_optional_fields() -> None:
     # A minimal row should still parse without crashing.
     row = {
         "MsgID": "MIN0001",
-        "ChatJID": "5493333333333@s.whatsapp.net",
+        "ChatJID": "15550100003@s.whatsapp.net",
         "Timestamp": "2026-06-04T00:00:00Z",
     }
     record = WacliClient._parse_message(row)
@@ -296,7 +296,7 @@ def test_export_messages_extracts_and_filters_window(monkeypatch) -> None:
     monkeypatch.setattr(client, "run_json", lambda *a, **k: payload)
 
     records = client.export_messages(
-        "5491111111111@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         since=datetime(2026, 6, 3, tzinfo=UTC),
     )
     # Only the PTT message (2026-06-03) is on/after the `since` bound.
@@ -306,9 +306,7 @@ def test_export_messages_extracts_and_filters_window(monkeypatch) -> None:
 def test_export_messages_handles_null_messages(monkeypatch) -> None:
     client = _client()
     monkeypatch.setattr(client, "run_json", lambda *a, **k: {"messages": None, "fts": True})
-    records = client.export_messages(
-        "x@s.whatsapp.net", since=datetime(2020, 1, 1, tzinfo=UTC)
-    )
+    records = client.export_messages("x@s.whatsapp.net", since=datetime(2020, 1, 1, tzinfo=UTC))
     assert records == []
 
 
@@ -317,9 +315,7 @@ def test_export_messages_naive_since_assumed_utc(monkeypatch) -> None:
     client = _client()
     monkeypatch.setattr(client, "run_json", lambda *a, **k: payload)
     # Naive `since` before the message time -> message is included.
-    records = client.export_messages(
-        "5491111111111@s.whatsapp.net", since=datetime(2026, 6, 1, 0, 0)
-    )
+    records = client.export_messages("15550100001@s.whatsapp.net", since=datetime(2026, 6, 1, 0, 0))
     assert [r.id for r in records] == ["TEXT0001"]
 
 
@@ -328,7 +324,7 @@ def test_export_messages_until_is_exclusive(monkeypatch) -> None:
     client = _client()
     monkeypatch.setattr(client, "run_json", lambda *a, **k: payload)
     records = client.export_messages(
-        "5491111111111@s.whatsapp.net",
+        "15550100001@s.whatsapp.net",
         since=datetime(2026, 6, 1, 0, 0, tzinfo=UTC),
         until=datetime(2026, 6, 1, 15, 30, tzinfo=UTC),  # == message ts
     )
@@ -339,7 +335,7 @@ def test_export_messages_until_is_exclusive(monkeypatch) -> None:
 # resolve_chat
 # --------------------------------------------------------------------------- #
 _CHATS = [
-    {"jid": "5491111111111@s.whatsapp.net", "kind": "dm", "name": "Alice"},
+    {"jid": "15550100001@s.whatsapp.net", "kind": "dm", "name": "Alice"},
     {"jid": "120363000000000000@g.us", "kind": "group", "name": "Familia"},
     {"jid": "120363999999999999@g.us", "kind": "group", "name": "Familia Extendida"},
     {"jid": "777@newsletter", "kind": "newsletter", "name": "Noticias"},
@@ -359,15 +355,13 @@ def _client_with_chats(monkeypatch, chats: list[dict]) -> WacliClient:
 def test_resolve_chat_by_jid(monkeypatch) -> None:
     client = _client_with_chats(monkeypatch, _CHATS)
     ref = client.resolve_chat("120363000000000000@g.us")
-    assert ref == ChatRef(
-        jid="120363000000000000@g.us", name="Familia", chat_type="group"
-    )
+    assert ref == ChatRef(jid="120363000000000000@g.us", name="Familia", chat_type="group")
 
 
 def test_resolve_chat_exact_name_case_insensitive(monkeypatch) -> None:
     client = _client_with_chats(monkeypatch, _CHATS)
     ref = client.resolve_chat("alice")
-    assert ref.jid == "5491111111111@s.whatsapp.net"
+    assert ref.jid == "15550100001@s.whatsapp.net"
     assert ref.chat_type == "dm"
 
 
@@ -426,9 +420,7 @@ def test_list_groups_null_data_is_empty(monkeypatch) -> None:
 
 def test_list_groups_dict_with_groups_key(monkeypatch) -> None:
     client = _client()
-    monkeypatch.setattr(
-        client, "run_json", lambda *a, **k: {"groups": [{"JID": "1@g.us"}]}
-    )
+    monkeypatch.setattr(client, "run_json", lambda *a, **k: {"groups": [{"JID": "1@g.us"}]})
     assert client.list_groups() == [{"JID": "1@g.us"}]
 
 
@@ -513,7 +505,7 @@ def test_resolve_chat_group_subject_overrides_participant_name(monkeypatch) -> N
     # must win, so the group resolves by its real name.
     chats = [
         {"jid": "120363999999999999@g.us", "kind": "group", "name": "Pat Lee"},
-        {"jid": "5491100000000@s.whatsapp.net", "kind": "dm", "name": "Pat Lee"},
+        {"jid": "15550100000@s.whatsapp.net", "kind": "dm", "name": "Pat Lee"},
     ]
     client = _client()
     monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
@@ -531,12 +523,12 @@ def test_resolve_chat_group_subject_overrides_participant_name(monkeypatch) -> N
     # And the participant DM still resolves under its own name, no longer
     # colliding with the group (whose name is now the subject).
     dm = client.resolve_chat("Pat Lee")
-    assert dm.jid == "5491100000000@s.whatsapp.net"
+    assert dm.jid == "15550100000@s.whatsapp.net"
 
 
 def test_resolve_chat_skips_group_lookup_when_no_groups(monkeypatch) -> None:
     # No group rows at all, so the group lookup must not run.
-    chats = [{"jid": "5491111111111@s.whatsapp.net", "kind": "dm", "name": "Alice"}]
+    chats = [{"jid": "15550100001@s.whatsapp.net", "kind": "dm", "name": "Alice"}]
     client = _client()
     monkeypatch.setattr(client, "list_chats", lambda *a, **k: chats)
 
@@ -545,7 +537,7 @@ def test_resolve_chat_skips_group_lookup_when_no_groups(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "group_names", boom)
     ref = client.resolve_chat("Alice")
-    assert ref.jid == "5491111111111@s.whatsapp.net"
+    assert ref.jid == "15550100001@s.whatsapp.net"
 
 
 def test_resolve_chat_backfill_is_best_effort(monkeypatch) -> None:
@@ -632,6 +624,73 @@ def test_run_json_timeout_raises_wacli_error(monkeypatch) -> None:
         client.run_json("sync", "--once", read_only=False, timeout=90)
 
 
+def test_run_json_uses_configured_default_timeout(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    client = WacliClient(Config(command_timeout=17.5))
+    monkeypatch.setattr(client, "ensure_available", lambda: None)
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout='{"success": true, "data": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert client.run_json("chats", "list") == []
+    assert captured["timeout"] == 17.5
+
+
+def test_named_account_is_passed_without_store_flag() -> None:
+    client = WacliClient(Config(wacli_account="example-account"))
+
+    args = client._base_args()
+
+    assert args[-2:] == ["--account", "example-account"]
+    assert "--store" not in args
+
+
+def test_passthrough_reuses_account_and_read_only_policy(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    client = WacliClient(Config(wacli_account="example-account"))
+    monkeypatch.setattr(client, "ensure_available", lambda: None)
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args=argv, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert client.run_passthrough("history", "coverage", read_only=True, timeout=17.5) == 0
+    assert captured["argv"] == [
+        "wacli",
+        "--read-only",
+        "--account",
+        "example-account",
+        "history",
+        "coverage",
+    ]
+    assert captured["kwargs"]["timeout"] == 17.5
+    assert captured["kwargs"]["env"]["WACLI_READONLY"] == "1"
+
+
+def test_passthrough_timeout_raises_wacli_error(monkeypatch) -> None:
+    client = _client()
+    monkeypatch.setattr(client, "ensure_available", lambda: None)
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=9)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    with pytest.raises(WacliError, match="timed out after 9s"):
+        client.run_passthrough("sync", read_only=False, timeout=9)
+
+
 # --------------------------------------------------------------------------- #
 # ensure_media (no subprocess; run_json stubbed)
 # --------------------------------------------------------------------------- #
@@ -689,6 +748,57 @@ def test_ensure_media_downloads_and_returns_path(tmp_path: Path, monkeypatch) ->
     assert result.path.exists()
     assert result.path.suffix == ".jpg"
     assert result.expired is False
+
+
+def test_ensure_media_passes_media_timeout(tmp_path: Path, monkeypatch) -> None:
+    client = WacliClient(Config(cache_dir=tmp_path / "cache", media_timeout=23.0))
+    record = _media_record(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_run_json(*args, **kwargs):
+        captured.update(kwargs)
+        out = Path(args[args.index("--output") + 1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"image")
+        return {"path": str(out)}
+
+    monkeypatch.setattr(client, "run_json", fake_run_json)
+
+    assert client.ensure_media(record).path is not None
+    assert captured["timeout"] == 23.0
+
+
+def test_ensure_media_reuses_deterministic_cached_target(tmp_path: Path, monkeypatch) -> None:
+    client = WacliClient(Config(cache_dir=tmp_path / "cache"))
+    record = _media_record(tmp_path)
+    target = client._media_target(record)
+    target.write_bytes(b"already downloaded")
+
+    def unexpected_download(*args, **kwargs):
+        raise AssertionError("cached media must not be downloaded again")
+
+    monkeypatch.setattr(client, "run_json", unexpected_download)
+
+    assert client.ensure_media(record) == MediaResult(path=target)
+
+
+def test_media_cache_identity_includes_profile_chat_and_message(tmp_path: Path) -> None:
+    common = {"cache_dir": tmp_path / "cache"}
+    personal = WacliClient(Config(profile="personal", **common))
+    work = WacliClient(Config(profile="work", **common))
+    record = _media_record(tmp_path, id="same-id")
+    other_chat = record.model_copy(update={"chat_jid": "15550100003@s.whatsapp.net"})
+    other_message = record.model_copy(update={"id": "other-id"})
+
+    targets = {
+        personal._media_target(record),
+        work._media_target(record),
+        personal._media_target(other_chat),
+        personal._media_target(other_message),
+    }
+
+    assert len(targets) == 4
+    assert all(path.is_relative_to(tmp_path / "cache") for path in targets)
 
 
 def test_ensure_media_downloads_document(tmp_path: Path, monkeypatch) -> None:

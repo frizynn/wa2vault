@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from wa2vault.transcribe.base import TranscriptResult
-from wa2vault.transcribe.cache import TranscriptCache
+from wa2vault.transcribe.cache import TranscriptCache, TranscriptCacheKey
 from wa2vault.transcribe.faster_whisper_backend import (
     TARGET_SAMPLE_RATE,
     FasterWhisperTranscriber,
@@ -88,6 +88,25 @@ def test_transcribe_undecodable_audio_raises(tmp_path: Path) -> None:
         transcriber.transcribe(garbage)
 
 
+def test_ffmpeg_timeout_is_bounded_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audio = tmp_path / "voice.ogg"
+    audio.write_bytes(b"synthetic")
+    transcriber = FasterWhisperTranscriber(model="tiny", ffmpeg_timeout=4.5)
+    captured: dict[str, object] = {}
+
+    def time_out(*args, **kwargs):
+        captured.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+
+    with pytest.raises(RuntimeError, match="ffmpeg timed out after 4.5s"):
+        transcriber.transcribe(audio)
+    assert captured["timeout"] == 4.5
+
+
 def test_cache_roundtrip(tmp_path: Path) -> None:
     cache = TranscriptCache(tmp_path / "cache")
     result = TranscriptResult(
@@ -110,9 +129,7 @@ def test_cache_missing_key_returns_none(tmp_path: Path) -> None:
 def test_cache_set_replaces_existing(tmp_path: Path) -> None:
     cache = TranscriptCache(tmp_path / "cache")
     first = TranscriptResult(text="first", language="es", backend="faster-whisper:tiny")
-    second = TranscriptResult(
-        text="second", language="es", backend="faster-whisper:tiny"
-    )
+    second = TranscriptResult(text="second", language="es", backend="faster-whisper:tiny")
     cache.set("MSG_1", first)
     cache.set("MSG_1", second)
     assert cache.get("MSG_1") == "second"
@@ -123,6 +140,84 @@ def test_cache_creates_directory(tmp_path: Path) -> None:
     assert not cache_dir.exists()
     TranscriptCache(cache_dir)
     assert cache_dir.exists()
+
+
+def _composite_key(media_path: Path, **overrides: str) -> TranscriptCacheKey:
+    values = {
+        "profile": "personal",
+        "chat_jid": "15550100001@s.whatsapp.net",
+        "message_id": "message-1",
+        "backend": "faster-whisper",
+        "model": "tiny",
+        "language": "es",
+    }
+    values.update(overrides)
+    return TranscriptCacheKey.from_media(media_path=media_path, **values)
+
+
+def test_composite_cache_key_is_stable_and_does_not_expose_identity(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "voice.ogg"
+    media.write_bytes(b"synthetic voice bytes")
+
+    first = _composite_key(media)
+    second = _composite_key(media)
+
+    assert first == second
+    assert first.value == second.value
+    assert len(first.value) == 64
+    assert "15550100001" not in first.value
+    assert "message-1" not in first.value
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("profile", "work"),
+        ("chat_jid", "15550100002@s.whatsapp.net"),
+        ("message_id", "message-2"),
+        ("backend", "another-backend"),
+        ("model", "medium"),
+        ("language", "en"),
+    ],
+)
+def test_composite_cache_key_covers_every_transcription_input(
+    tmp_path: Path, field: str, changed: str
+) -> None:
+    media = tmp_path / "voice.ogg"
+    media.write_bytes(b"same bytes")
+
+    assert _composite_key(media).value != _composite_key(media, **{field: changed}).value
+
+
+def test_composite_cache_key_changes_when_media_bytes_change(tmp_path: Path) -> None:
+    first_media = tmp_path / "first.ogg"
+    second_media = tmp_path / "second.ogg"
+    first_media.write_bytes(b"first bytes")
+    second_media.write_bytes(b"second bytes")
+
+    assert _composite_key(first_media).value != _composite_key(second_media).value
+
+
+def test_cache_keeps_composite_identities_disjoint(tmp_path: Path) -> None:
+    media = tmp_path / "voice.ogg"
+    media.write_bytes(b"voice")
+    cache = TranscriptCache(tmp_path / "cache")
+    personal = _composite_key(media, profile="personal")
+    work = _composite_key(media, profile="work")
+    personal_result = TranscriptResult(
+        text="personal transcript", language="es", backend="faster-whisper:tiny"
+    )
+    work_result = TranscriptResult(
+        text="work transcript", language="es", backend="faster-whisper:tiny"
+    )
+
+    cache.set(personal, personal_result)
+    cache.set(work, work_result)
+
+    assert cache.get(personal) == "personal transcript"
+    assert cache.get(work) == "work transcript"
 
 
 def _is_model_load_failure(exc: Exception) -> bool:

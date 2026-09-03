@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Read-only WhatsApp chat exporter that transcribes voice notes locally and renders Markdown into an Obsidian vault."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Juan Francisco Lebrero" }]
 dependencies = [
     "faster-whisper>=1.2.1",
@@ -21,12 +22,13 @@ Homepage = "https://github.com/frizynn/wa2vault"
 Repository = "https://github.com/frizynn/wa2vault"
 
 [build-system]
-requires = ["uv_build>=0.11.14,<0.12.0"]
+requires = ["uv_build>=0.12.9,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-cov>=7.0.0",
     "ruff>=0.15.16",
 ]
 
@@ -38,3 +40,14 @@ select = ["E", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"
+
+[tool.coverage.run]
+branch = true
+source = ["wa2vault"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

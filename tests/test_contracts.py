@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from wa2vault.config import Config
 from wa2vault.models import MessageRecord
@@ -54,6 +55,171 @@ def test_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert config.default_days == 7
 
 
+def test_config_defaults_remain_backwards_compatible() -> None:
+    config = Config()
+
+    assert config.profile == "default"
+    assert config.profile_key.startswith("default--")
+    assert config.wacli_account is None
+    assert config.allow_git_vault is False
+
+
+def test_profile_scopes_runtime_paths_without_changing_shared_roots(
+    tmp_path: Path,
+) -> None:
+    config = Config(
+        profile="Work Account",
+        cache_dir=tmp_path / "cache",
+        state_dir=tmp_path / "state",
+        contacts_file=tmp_path / "contacts.json",
+    )
+
+    assert config.profile == "Work Account"
+    assert config.profile_key.startswith("work-account--")
+    assert config.profile_cache_dir == tmp_path / "cache" / "profiles" / config.profile_key
+    assert config.profile_state_dir == tmp_path / "state" / "profiles" / config.profile_key
+    assert config.profile_contacts_file == (
+        tmp_path / "profiles" / config.profile_key / "contacts.json"
+    )
+    assert config.cache_dir == tmp_path / "cache"
+    assert config.state_dir == tmp_path / "state"
+
+
+def test_archive_state_is_scoped_by_profile_and_destination_vault(tmp_path: Path) -> None:
+    common = {"state_dir": tmp_path / "state"}
+    personal = Config(profile="personal", vault_dir=tmp_path / "vault-a", **common)
+    work = Config(profile="work", vault_dir=tmp_path / "vault-a", **common)
+    another_vault = Config(profile="personal", vault_dir=tmp_path / "vault-b", **common)
+
+    assert (
+        len(
+            {
+                personal.archive_state_dir,
+                work.archive_state_dir,
+                another_vault.archive_state_dir,
+            }
+        )
+        == 3
+    )
+    assert personal.archive_state_dir.is_relative_to(personal.profile_state_dir)
+
+
+@pytest.mark.parametrize("profile", ["", "   "])
+def test_profile_rejects_blank_values(profile: str) -> None:
+    with pytest.raises(ValidationError):
+        Config(profile=profile)
+
+
+def test_wacli_account_and_store_are_mutually_exclusive(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="wacli_account|wacli_db"):
+        Config(wacli_account="example-account", wacli_db=tmp_path / "store")
+
+
+def test_environment_account_and_store_are_mutually_exclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.toml"
+    Config._write_default(config_path)
+    monkeypatch.setenv("WA2VAULT_WACLI_ACCOUNT", "example-account")
+    monkeypatch.setenv("WA2VAULT_WACLI_DB", str(tmp_path / "store"))
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        Config.load(config_path)
+
+
+def test_named_profile_applies_account_and_path_overrides(tmp_path: Path) -> None:
+    config = Config(
+        wacli_db=tmp_path / "default-store",
+        profiles={
+            "work": {
+                "wacli_account": "example-work",
+                "vault_dir": tmp_path / "work-vault",
+                "language": "en",
+            }
+        },
+    )
+
+    selected = config.select_profile("work")
+
+    assert selected.profile == "work"
+    assert selected.wacli_account == "example-work"
+    assert selected.wacli_db is None
+    assert selected.vault_dir == tmp_path / "work-vault"
+    assert selected.language == "en"
+
+
+def test_unknown_named_profile_fails_with_available_names() -> None:
+    config = Config(profiles={"personal": {}})
+
+    with pytest.raises(ValueError, match="personal"):
+        config.select_profile("work")
+
+
+def test_environment_profile_selects_matching_toml_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[profiles.work]\nwacli_account = "example-work"\nlanguage = "en"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WA2VAULT_PROFILE", "work")
+
+    selected = Config.load(config_path)
+
+    assert selected.profile == "work"
+    assert selected.wacli_account == "example-work"
+    assert selected.language == "en"
+
+
+def test_explicit_profile_overrides_env_without_inheriting_another_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'profile = "personal"\nlanguage = "es"\n'
+        '[profiles.personal]\nlanguage = "pt"\n'
+        '[profiles.work]\nwacli_account = "example-work"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WA2VAULT_PROFILE", "personal")
+
+    selected = Config.load(config_path, profile="work")
+
+    assert selected.profile == "work"
+    assert selected.language == "es"
+    assert selected.wacli_account == "example-work"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("WA2VAULT_DEFAULT_DAYS", "0"),
+        ("WA2VAULT_ASR_BACKEND", "unknown"),
+        ("WA2VAULT_COMMAND_TIMEOUT", "0"),
+        ("WA2VAULT_PROFILE", "   "),
+    ],
+)
+def test_invalid_environment_overrides_are_revalidated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    Config._write_default(config_path)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises((ValidationError, ValueError)):
+        Config.load(config_path)
+
+
+def test_timeout_values_must_be_positive() -> None:
+    for field in ("command_timeout", "media_timeout", "ffmpeg_timeout"):
+        with pytest.raises(ValidationError):
+            Config.model_validate({field: 0})
+
+
 def test_transcript_result_model() -> None:
     result = TranscriptResult(text="hi", language="es", backend="faster-whisper")
     assert result.duration_s is None
@@ -77,18 +243,6 @@ def test_faster_whisper_transcribe_missing_file_raises(tmp_path: Path) -> None:
     transcriber = get_transcriber(Config())
     with pytest.raises(FileNotFoundError):
         transcriber.transcribe(tmp_path / "does-not-exist.ogg")
-
-
-def test_nemotron_backend_selection_fails_fast() -> None:
-    """Selecting the not-yet-implemented 'nemotron' backend must fail immediately.
-
-    Config validation still accepts 'nemotron' (it stays in the AsrBackend
-    Literal), but the factory raises at selection time rather than returning a
-    transcriber that explodes only when first used.
-    """
-    config = Config(asr_backend="nemotron")
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
-        get_transcriber(config)
 
 
 def test_unknown_backend_raises() -> None:

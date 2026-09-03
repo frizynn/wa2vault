@@ -11,7 +11,7 @@ A Typer app exposing the wa2vault commands:
 
 The CLI loads configuration once (with an optional ``--config`` override),
 delegates WhatsApp data access to ``wacli`` via
-:class:`~wa2vault.wacli.WacliClient`, and calls into the Phase-2 pipeline in
+:class:`~wa2vault.wacli.WacliClient`, and calls into the pull pipeline in
 :mod:`wa2vault.pipeline` for the data-heavy work.
 
 wa2vault never sends WhatsApp messages. Read/query wacli commands run with the
@@ -22,18 +22,21 @@ The never-send guarantee holds regardless: wa2vault never invokes ``wacli send``
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
 from wa2vault import __version__
-from wa2vault.config import Config
+from wa2vault.config import Config, UnknownProfileError
 from wa2vault.contacts import ContactBook, pretty_phone
 from wa2vault.lock import find_store_lock
-from wa2vault.wacli import WacliClient, WacliError, _is_placeholder_group
+from wa2vault.wacli import (
+    WacliClient,
+    WacliError,
+    WacliTimeoutError,
+    _is_placeholder_group,
+)
 
 app = typer.Typer(
     name="wa2vault",
@@ -74,6 +77,13 @@ def main(
             dir_okay=False,
         ),
     ] = None,
+    profile: Annotated[
+        Optional[str],
+        typer.Option(
+            "--profile",
+            help="Logical personal/work profile used to isolate state and output.",
+        ),
+    ] = None,
     _version: Annotated[
         bool,
         typer.Option(
@@ -85,42 +95,16 @@ def main(
     ] = False,
 ) -> None:
     """Load configuration and stash it on the context for subcommands."""
-    config = Config.load(config_path)
+    try:
+        config = Config.load(config_path, profile=profile)
+    except UnknownProfileError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--profile") from exc
     ctx.obj = {_CONFIG_OBJ_KEY: config}
 
 
 def _config(ctx: typer.Context) -> Config:
     """Fetch the resolved :class:`Config` from the Typer context."""
     return ctx.obj[_CONFIG_OBJ_KEY]
-
-
-def _run_wacli_passthrough(
-    config: Config, args: list[str], *, read_only: bool = True
-) -> int:
-    """Run a wacli subcommand attached to the user's terminal (no capture).
-
-    Used by ``auth`` and ``sync`` where wacli renders a QR code or streams sync
-    progress directly to the terminal. ``read_only`` toggles wacli's read-only
-    guard (``WACLI_READONLY``); it must be False for ``auth``/``sync``, which
-    write the local store (pairing keys / mirrored messages).
-
-    Returns the wacli process exit code.
-    """
-    env = dict(os.environ)
-    if read_only:
-        env["WACLI_READONLY"] = "1"
-    else:
-        env.pop("WACLI_READONLY", None)
-    argv = [config.wacli_bin]
-    if config.wacli_db is not None:
-        argv += ["--store", str(config.wacli_db)]
-    argv += args
-    try:
-        proc = subprocess.run(argv, env=env, check=False)
-    except OSError as exc:
-        typer.secho(f"Failed to run wacli: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1) from exc
-    return proc.returncode
 
 
 def _abort_if_store_locked(config: Config, *, action: str) -> None:
@@ -168,7 +152,12 @@ def auth(ctx: typer.Context) -> None:
         "Starting wacli pairing. Scan the QR with your phone "
         "(WhatsApp -> Settings -> Linked Devices)."
     )
-    code = _run_wacli_passthrough(config, ["auth"], read_only=False)
+    client = WacliClient(config)
+    try:
+        code = client.run_passthrough("auth", read_only=False, timeout=None)
+    except WacliError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
     raise typer.Exit(code=code)
 
 
@@ -213,12 +202,36 @@ def sync(
     args = ["sync", "--once", "--idle-exit", f"{idle}s"]
     if media:
         args.append("--download-media")
-    code = _run_wacli_passthrough(config, args, read_only=False)
+    client = WacliClient(config)
+    try:
+        code = client.run_passthrough(
+            *args,
+            read_only=False,
+            timeout=config.sync_timeout or config.command_timeout,
+        )
+    except WacliTimeoutError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=124) from exc
+    except WacliError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
     if code != 0:
         raise typer.Exit(code=code)
     if history:
         # `history coverage` is a pure read, so the read-only guard stays on.
-        _run_wacli_passthrough(config, ["history", "coverage"])
+        try:
+            client.run_passthrough(
+                "history",
+                "coverage",
+                read_only=True,
+                timeout=config.command_timeout,
+            )
+        except WacliError as exc:
+            typer.secho(
+                f"warning: history coverage unavailable: {exc}",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
     raise typer.Exit(code=0)
 
 
@@ -269,7 +282,7 @@ def chats(
         typer.echo("No chats found. Run `wa2vault auth` then `wa2vault sync` first.")
         raise typer.Exit(code=0)
 
-    book = ContactBook(config.contacts_file)
+    book = ContactBook(config.profile_contacts_file)
     _print_chats_table(rows, book, _safe_group_names(client))
 
 
@@ -316,9 +329,7 @@ def _display_name(
     return raw_name
 
 
-def _print_chats_table(
-    rows: list[dict], book: ContactBook, group_names: dict[str, str]
-) -> None:
+def _print_chats_table(rows: list[dict], book: ContactBook, group_names: dict[str, str]) -> None:
     """Print chats as an aligned NAME / TYPE / JID table."""
 
     def field(row: dict, *keys: str) -> str:
@@ -365,9 +376,7 @@ def pull(
     ],
     days: Annotated[
         Optional[int],
-        typer.Option(
-            "--days", min=1, help="Days of history to include (default from config)."
-        ),
+        typer.Option("--days", min=1, help="Days of history to include (default from config)."),
     ] = None,
     transcribe: Annotated[
         bool,
@@ -441,8 +450,8 @@ def transcribe(
 ) -> None:
     """Transcribe a single audio file with the configured ASR backend and print the text.
 
-    Wires directly to the transcription contract, so this works as soon as the
-    Phase-2 backend is implemented.
+    Uses the selected profile's local transcription backend and language unless
+    ``--language`` overrides the hint.
     """
     config = _config(ctx)
     lang = language if language is not None else config.language
@@ -450,15 +459,7 @@ def transcribe(
     from wa2vault.transcribe import get_transcriber
 
     transcriber = get_transcriber(config)
-    try:
-        result = transcriber.transcribe(audio_path, language=lang)
-    except NotImplementedError as exc:
-        typer.secho(
-            f"ASR backend '{config.asr_backend}' is not implemented yet: {exc}",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
+    result = transcriber.transcribe(audio_path, language=lang)
     typer.echo(result.text)
 
 
@@ -476,7 +477,7 @@ def contact_add(
 ) -> None:
     """Save a local name for a number/JID, so chats show it instead of digits."""
     config = _config(ctx)
-    book = ContactBook(config.contacts_file)
+    book = ContactBook(config.profile_contacts_file)
     try:
         jid = book.set(number, name)
     except ValueError as exc:
@@ -489,7 +490,7 @@ def contact_add(
 def contact_list(ctx: typer.Context) -> None:
     """List saved contacts as a NAME -> PHONE table."""
     config = _config(ctx)
-    book = ContactBook(config.contacts_file)
+    book = ContactBook(config.profile_contacts_file)
     entries = book.items()
     if not entries:
         typer.echo("No saved contacts yet.")
@@ -519,7 +520,7 @@ def contact_rm(
 ) -> None:
     """Remove a saved contact by number/JID or by exact name."""
     config = _config(ctx)
-    book = ContactBook(config.contacts_file)
+    book = ContactBook(config.profile_contacts_file)
     if book.remove(query):
         typer.secho(f"Removed {query!r}.", fg=typer.colors.GREEN)
     else:

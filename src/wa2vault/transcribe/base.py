@@ -4,7 +4,7 @@ This module defines the stable interface that the transcription layer exposes
 to the rest of wa2vault. The ``pull`` pipeline and the one-off ``transcribe``
 CLI command both depend only on this contract, never on a concrete backend.
 
-Phase-2 backends implement :meth:`Transcriber.transcribe`. The factory
+Concrete backends implement :meth:`Transcriber.transcribe`. The factory
 :func:`get_transcriber` maps a :class:`~wa2vault.config.Config` to a concrete
 :class:`Transcriber` instance.
 """
@@ -27,9 +27,7 @@ class TranscriptResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(description="The transcribed text.")
-    language: str = Field(
-        description="Detected or assumed language (ISO-639-1 code, e.g. 'es')."
-    )
+    language: str = Field(description="Detected or assumed language (ISO-639-1 code, e.g. 'es').")
     duration_s: float | None = Field(
         default=None,
         description="Duration of the source audio in seconds, if known.",
@@ -83,25 +81,18 @@ def get_transcriber(config: Config) -> Transcriber:
         A concrete :class:`Transcriber` instance.
 
     Raises:
-        NotImplementedError: If ``config.asr_backend`` is a recognized but
-            not-yet-implemented backend (``nemotron``).
-        ValueError: If ``config.asr_backend`` is not a known backend.
+        ValueError: If validation was bypassed and the backend is unsupported.
     """
-    backend = config.asr_backend
-    if backend == "faster-whisper":
-        from wa2vault.transcribe.faster_whisper_backend import (
-            FasterWhisperTranscriber,
-        )
+    if config.asr_backend != "faster-whisper":
+        raise ValueError(f"Unknown ASR backend: {config.asr_backend!r}")
 
-        return FasterWhisperTranscriber(
-            model=config.asr_model,
-            language=config.language,
-        )
-    if backend == "nemotron":
-        raise NotImplementedError(
-            "The 'nemotron' ASR backend is not implemented yet; use 'faster-whisper'."
-        )
-    raise ValueError(f"Unknown ASR backend: {backend!r}")
+    from wa2vault.transcribe.faster_whisper_backend import FasterWhisperTranscriber
+
+    return FasterWhisperTranscriber(
+        model=config.asr_model,
+        language=config.language,
+        ffmpeg_timeout=config.ffmpeg_timeout,
+    )
 
 
 __all__ = ["TranscriptResult", "Transcriber", "get_transcriber"]

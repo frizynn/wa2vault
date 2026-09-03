@@ -85,7 +85,5 @@ def test_find_store_lock_returns_holder_for_live_foreign_pid(
 def test_find_store_lock_ignores_our_own_pid(tmp_path: Path) -> None:
     """A LOCK file naming this process is not treated as a foreign holder."""
     config = _config_with_store(tmp_path)
-    (tmp_path / "store" / lock.LOCK_FILENAME).write_text(
-        f"pid={os.getpid()}\n", encoding="utf-8"
-    )
+    (tmp_path / "store" / lock.LOCK_FILENAME).write_text(f"pid={os.getpid()}\n", encoding="utf-8")
     assert lock.find_store_lock(config) is None

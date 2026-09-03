@@ -34,18 +34,20 @@ End-to-end flow of :func:`pull_chat`:
 from __future__ import annotations
 
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from wa2vault.archive import ArchiveStore
 from wa2vault.config import Config
 from wa2vault.contacts import ContactBook
+from wa2vault.fs import atomic_copy, ensure_vault_is_safe
+from wa2vault.identity import attachment_name, chat_key
 from wa2vault.lock import find_store_lock
 from wa2vault.models import MessageRecord
-from wa2vault.render import render_markdown, slugify, write_note
+from wa2vault.render import render_markdown, write_note
 from wa2vault.transcribe import Transcriber, get_transcriber
-from wa2vault.transcribe.cache import TranscriptCache
+from wa2vault.transcribe.cache import TranscriptCache, TranscriptCacheKey
 from wa2vault.wacli import ChatNotFound, ChatRef, WacliClient, WacliError
 
 #: Subdirectory (under ``output_subdir``) where copied attachments are stored.
@@ -111,6 +113,9 @@ def pull_chat(
     days: int,
     transcribe: bool = True,
     download_media: bool = True,
+    *,
+    client: WacliClient | None = None,
+    archive: ArchiveStore | None = None,
 ) -> PullResult:
     """Run the full pull pipeline for one chat and write a vault note.
 
@@ -130,38 +135,20 @@ def pull_chat(
         wa2vault.wacli.ChatNotUnique: ``chat`` matched more than one chat.
     """
     warnings: list[str] = []
-    client = WacliClient(config)
+    ensure_vault_is_safe(config.vault_dir, allow_git_vault=config.allow_git_vault)
+    client = client or WacliClient(config)
+    archive = archive or ArchiveStore(config.archive_state_dir)
 
-    # 1. Sync (best-effort): a sync failure OR a sync that exceeds
-    # ``config.sync_timeout`` must not abort the pull; we proceed with whatever
-    # is already in the local store. The timeout matters because ``sync --once``
-    # only returns once the stream goes idle, which can take minutes on a stale
-    # store with a large backlog -- without a bound the whole pull would hang
-    # here and never reach export/transcribe/render.
-    #
-    # If another wa2vault/wacli instance is already syncing, we do NOT start a
-    # second writer (wacli is single-writer; a second one just races for an
-    # exclusive lock it cannot get and fails late). Instead we skip the sync and
-    # export from the current local store -- reads are safe alongside the running
-    # writer -- recording the skip as a warning.
-    held = find_store_lock(config)
-    if held is not None:
-        warnings.append(
-            f"another wa2vault/wacli instance is syncing ({held.describe()}); "
-            "skipped the store sync and exported from the current local store"
-        )
-    else:
-        try:
-            client.sync_once(timeout=config.sync_timeout)
-        except WacliError as exc:
-            warnings.append(f"sync incomplete, using local store as-is: {exc}")
+    # 1. Refresh the mirror when no other writer owns the wacli store. Sync is
+    # best-effort: the durable local archive remains usable after a timeout.
+    _sync_store(client, config, warnings)
 
     # 2. Resolve the chat. A local contact-book name takes precedence so the
     # note title/filename use the friendly name even when WhatsApp never synced
     # the contact. ChatNotFound / ChatNotUnique propagate to the caller.
     chatref = _resolve_chat(client, chat, config)
     chat_name = chatref.name or chatref.jid
-    chat_slug = slugify(chat_name)
+    stable_chat_key = chat_key(config.profile, chatref.jid, chat_name)
 
     # 3. Export the requested time window.
     since = datetime.now(timezone.utc) - timedelta(days=days)
@@ -181,7 +168,7 @@ def pull_chat(
             client,
             records,
             config=config,
-            chat_slug=chat_slug,
+            stable_chat_key=stable_chat_key,
             local_audio_paths=local_audio_paths,
             warnings=warnings,
         )
@@ -197,7 +184,12 @@ def pull_chat(
             warnings=warnings,
         )
 
-    # 6. Render and write the note.
+    # 6. Merge this window before rendering. The note is always built from the
+    # complete durable timeline, so a shorter later window cannot truncate it.
+    archive.upsert(config.profile, chatref.jid, records)
+    records = archive.list(config.profile, chatref.jid)
+
+    # 7. Render and atomically write the note.
     generated_at = datetime.now(timezone.utc)
     markdown = render_markdown(
         records,
@@ -206,12 +198,16 @@ def pull_chat(
         chat_type=chatref.chat_type,
         days=days,
         generated_at=generated_at,
+        profile=config.profile,
     )
     note_path = write_note(
         markdown,
         vault_dir=config.vault_dir,
         output_subdir=config.output_subdir,
         chat_name=chat_name,
+        chat_jid=chatref.jid,
+        profile=config.profile,
+        allow_git_vault=config.allow_git_vault,
     )
 
     images_count = sum(
@@ -236,6 +232,21 @@ def pull_chat(
     )
 
 
+def _sync_store(client: WacliClient, config: Config, warnings: list[str]) -> None:
+    """Refresh wacli without racing its single-writer lock or aborting a pull."""
+    held = find_store_lock(config)
+    if held is not None:
+        warnings.append(
+            f"another wa2vault/wacli instance is syncing ({held.describe()}); "
+            "skipped the store sync and exported from the current local store"
+        )
+        return
+    try:
+        client.sync_once(timeout=config.sync_timeout)
+    except WacliError as exc:
+        warnings.append(f"sync incomplete, using local store as-is: {exc}")
+
+
 def _resolve_chat(client: WacliClient, chat: str, config: Config) -> ChatRef:
     """Resolve ``chat`` to a :class:`ChatRef`, honoring the local contact book.
 
@@ -249,7 +260,7 @@ def _resolve_chat(client: WacliClient, chat: str, config: Config) -> ChatRef:
             or no chat matched at all.
         wa2vault.wacli.ChatNotUnique: ``chat`` matched more than one wacli chat.
     """
-    book = ContactBook(config.contacts_file)
+    book = ContactBook(config.profile_contacts_file)
     mapped = book.find(chat)
     if mapped is None:
         return client.resolve_chat(chat)
@@ -266,9 +277,7 @@ def _resolve_chat(client: WacliClient, chat: str, config: Config) -> ChatRef:
     return ChatRef(jid=resolved.jid, name=name, chat_type=resolved.chat_type)
 
 
-def _fill_dm_sender_names(
-    records: list[MessageRecord], chatref: ChatRef
-) -> list[MessageRecord]:
+def _fill_dm_sender_names(records: list[MessageRecord], chatref: ChatRef) -> list[MessageRecord]:
     """Return ``records`` with DM sender names that look like a bare number filled in.
 
     Only DM chats are touched (groups already carry real per-sender names). For
@@ -301,7 +310,7 @@ def _resolve_media(
     records: list[MessageRecord],
     *,
     config: Config,
-    chat_slug: str,
+    stable_chat_key: str,
     local_audio_paths: dict[str, Path],
     warnings: list[str],
 ) -> list[MessageRecord]:
@@ -318,7 +327,11 @@ def _resolve_media(
     list is returned.
     """
     attachments_dir = (
-        config.vault_dir / config.output_subdir / _MEDIA_SUBDIR / chat_slug
+        config.vault_dir
+        / config.output_subdir
+        / _MEDIA_SUBDIR
+        / config.profile_key
+        / stable_chat_key
     )
 
     resolved: list[MessageRecord] = []
@@ -328,9 +341,7 @@ def _resolve_media(
             # Reset any stale local path so the renderer shows the fallback,
             # marking expired media so it reads as "gone" rather than a bug.
             resolved.append(
-                record.model_copy(
-                    update={"media_path": None, "media_expired": media.expired}
-                )
+                record.model_copy(update={"media_path": None, "media_expired": media.expired})
             )
             continue
 
@@ -362,7 +373,7 @@ def _attachment_filename(record: MessageRecord, local: Path) -> str:
     """
     raw_name = record.raw.get("Filename") or record.raw.get("filename")
     candidate = str(raw_name).strip() if raw_name else ""
-    return Path(candidate).name or local.name
+    return attachment_name(record.id, Path(candidate).name or local.name)
 
 
 def _copy_media_into_vault(
@@ -381,9 +392,9 @@ def _copy_media_into_vault(
     ``filename`` so documents keep their original, readable name.
     """
     try:
-        attachments_dir.mkdir(parents=True, exist_ok=True)
         destination = attachments_dir / filename
-        shutil.copyfile(local, destination)
+        if not destination.is_file() or destination.stat().st_size == 0:
+            atomic_copy(local, destination)
     except OSError as exc:
         warnings.append(f"could not copy attachment {filename!r} into vault: {exc}")
         return None
@@ -406,14 +417,13 @@ def _transcribe_audio(
     not mutated; a new list is returned.
     """
     has_audio = any(
-        record.kind in _AUDIO_KINDS and record.id in local_audio_paths
-        for record in records
+        record.kind in _AUDIO_KINDS and record.id in local_audio_paths for record in records
     )
     if not has_audio:
         return list(records)
 
     transcriber = get_transcriber(config)
-    cache = TranscriptCache(config.cache_dir)
+    cache = TranscriptCache(config.profile_cache_dir)
 
     transcribed: list[MessageRecord] = []
     for record in records:
@@ -427,6 +437,7 @@ def _transcribe_audio(
             cache=cache,
             audio_path=local_audio_paths[record.id],
             language=config.language,
+            config=config,
             warnings=warnings,
         )
         if transcript is None:
@@ -443,6 +454,7 @@ def _transcript_for(
     cache: TranscriptCache,
     audio_path: Path,
     language: str,
+    config: Config,
     warnings: list[str],
 ) -> str | None:
     """Return the transcript text for one audio record, or None on failure.
@@ -451,7 +463,21 @@ def _transcript_for(
     the result is cached. A single transcription failure adds a warning and
     returns None so the caller can leave the record untranscribed.
     """
-    cached = cache.get(record.id)
+    try:
+        cache_key = TranscriptCacheKey.from_media(
+            profile=config.profile,
+            chat_jid=record.chat_jid,
+            message_id=record.id,
+            backend=config.asr_backend,
+            model=config.asr_model,
+            language=language,
+            media_path=audio_path,
+        )
+    except OSError as exc:
+        warnings.append(f"could not fingerprint audio for message {record.id}: {exc}")
+        return None
+
+    cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -461,7 +487,7 @@ def _transcript_for(
         warnings.append(f"transcription failed for message {record.id}: {exc}")
         return None
 
-    cache.set(record.id, result)
+    cache.set(cache_key, result)
     return result.text
 
 
