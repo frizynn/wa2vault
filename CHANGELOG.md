@@ -11,6 +11,9 @@ follow semantic versioning.
 
 ### Added
 
+- Opt-in `groq` transcription backend (Whisper hosted by Groq, e.g.
+  `whisper-large-v3-turbo`), with the API key read from `GROQ_API_KEY` or
+  `groq_api_key_file`.
 - Named, isolated personal/work profiles with wacli account or store selection.
 - Durable cumulative SQLite archives and composite transcript-cache identities.
 - Atomic/private file helpers, subprocess timeouts, and Git-worktree output

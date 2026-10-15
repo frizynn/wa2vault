@@ -12,11 +12,11 @@ one-time cost.
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wa2vault.transcribe.audio import run_ffmpeg
 from wa2vault.transcribe.base import Transcriber, TranscriptResult
 
 if TYPE_CHECKING:
@@ -124,39 +124,12 @@ class FasterWhisperTranscriber(Transcriber):
         Raises:
             RuntimeError: If ffmpeg is missing or fails to decode the input.
         """
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(audio_path),
-            "-ar",
-            str(TARGET_SAMPLE_RATE),
-            "-ac",
-            "1",
-            "-f",
-            "wav",
-            str(wav_path),
-        ]
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                "ffmpeg is required to decode audio but was not found on PATH."
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"ffmpeg timed out after {timeout:g}s") from exc
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg failed to decode {audio_path} "
-                f"(exit code {result.returncode}): {result.stderr.strip()}"
-            )
+        run_ffmpeg(
+            audio_path,
+            wav_path,
+            ["-ar", str(TARGET_SAMPLE_RATE), "-ac", "1", "-f", "wav"],
+            timeout=timeout,
+        )
 
 
 __all__ = ["FasterWhisperTranscriber"]

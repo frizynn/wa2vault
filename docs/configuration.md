@@ -37,6 +37,10 @@ contacts_file = "/path/to/private/wa2vault-config/contacts.json"
 asr_backend = "faster-whisper"
 asr_model = "medium"
 language = "es"
+# Opt-in remote transcription instead (uploads each voice note to Groq):
+# asr_backend = "groq"
+# asr_model = "whisper-large-v3-turbo"
+# groq_api_key_file = "/path/to/private/wa2vault-config/groq.key"
 default_days = 30
 
 sync_timeout = 300.0
@@ -73,8 +77,8 @@ gets its own derived state, cache, contacts, note, and media namespace.
 | `wacli_bin` | `wacli` | `WA2VAULT_WACLI_BIN` | No | Executable name or absolute path. |
 | `wacli_account` | unset | `WA2VAULT_WACLI_ACCOUNT` | Yes | Named wacli account passed as `--account`. |
 | `wacli_db` | unset | `WA2VAULT_WACLI_DB` | Yes | Explicit store passed as `--store`. |
-| `asr_backend` | `faster-whisper` | `WA2VAULT_ASR_BACKEND` | Yes | Local transcription backend. |
-| `asr_model` | `medium` | `WA2VAULT_ASR_MODEL` | Yes | faster-whisper model name or local model path. |
+| `asr_backend` | `faster-whisper` | `WA2VAULT_ASR_BACKEND` | Yes | `faster-whisper` transcribes locally; `groq` uploads each voice note to Groq. |
+| `asr_model` | `medium` | `WA2VAULT_ASR_MODEL` | Yes | faster-whisper model name or local model path; with `groq`, a Groq model such as `whisper-large-v3-turbo`. |
 | `language` | `es` | `WA2VAULT_LANGUAGE` | Yes | ISO-639-1 transcription hint. |
 | `default_days` | `30` | `WA2VAULT_DEFAULT_DAYS` | Yes | Pull window when `--days` is omitted; must be positive. |
 | `sync_timeout` | `300.0` | `WA2VAULT_SYNC_TIMEOUT` | Yes | Best-effort sync bound in seconds; blank/`none` uses `command_timeout`. |
@@ -84,6 +88,7 @@ gets its own derived state, cache, contacts, note, and media namespace.
 | `cache_dir` | platform cache directory | `WA2VAULT_CACHE_DIR` | Yes | Disposable transcript and downloaded-media cache root. |
 | `state_dir` | platform state directory | `WA2VAULT_STATE_DIR` | Yes | Durable cumulative archive root. |
 | `contacts_file` | platform config directory | `WA2VAULT_CONTACTS_FILE` | Yes | Local JID-to-display-name alias file. |
+| `groq_api_key_file` | platform config directory (`groq.key`) | `WA2VAULT_GROQ_API_KEY_FILE` | No | File with the Groq API key, read only when `asr_backend = "groq"` and `GROQ_API_KEY` is unset. Keep it at mode 600. |
 | `allow_git_vault` | `false` | `WA2VAULT_ALLOW_GIT_VAULT` | Yes | Explicit opt-in to write private output inside a Git worktree. |
 
 `wacli_account` and `wacli_db` are mutually exclusive. Setting both in TOML or

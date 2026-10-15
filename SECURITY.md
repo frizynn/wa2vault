@@ -38,6 +38,9 @@ wa2vault is local-first, not a secure enclave:
   identity. Do not share profile state directories.
 - Keep `allow_git_vault = false` unless the publication risk has been reviewed
   deliberately.
+- `asr_backend = "groq"` uploads every transcribed voice note to Groq. Choose it
+  only for chats whose audio may leave the machine, and keep the API key in
+  `GROQ_API_KEY` or a mode-600 `groq_api_key_file`, never in the config file.
 - Review encryption, retention, sharing, and deletion for cloud-synced vaults
   and backups.
 - Pair only on a trusted terminal. QR/session material grants access to the

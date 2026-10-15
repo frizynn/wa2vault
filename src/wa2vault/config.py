@@ -38,7 +38,7 @@ from wa2vault.identity import profile_key as identity_profile_key
 APP_NAME = "wa2vault"
 APP_AUTHOR = "wa2vault"
 
-AsrBackend = Literal["faster-whisper"]
+AsrBackend = Literal["faster-whisper", "groq"]
 _WACLI_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -57,6 +57,14 @@ def default_contacts_file() -> Path:
     Lives in the same directory as :func:`default_config_path`.
     """
     return Path(platformdirs.user_config_dir(APP_NAME, APP_AUTHOR)) / "contacts.json"
+
+
+def default_groq_api_key_file() -> Path:
+    """Return the file read for the Groq API key when ``GROQ_API_KEY`` is unset.
+
+    Lives in the same directory as :func:`default_config_path`.
+    """
+    return Path(platformdirs.user_config_dir(APP_NAME, APP_AUTHOR)) / "groq.key"
 
 
 def default_cache_dir() -> Path:
@@ -160,11 +168,17 @@ class Config(BaseModel):
     )
     asr_backend: AsrBackend = Field(
         default="faster-whisper",
-        description="ASR backend used to transcribe voice notes.",
+        description=(
+            "ASR backend used to transcribe voice notes: 'faster-whisper' runs locally, "
+            "'groq' uploads each voice note to Groq."
+        ),
     )
     asr_model: str = Field(
         default="medium",
-        description="ASR model name (e.g. a faster-whisper model size like 'medium').",
+        description=(
+            "ASR model name: a faster-whisper size like 'medium', or a Groq model like "
+            "'whisper-large-v3-turbo'."
+        ),
     )
     language: str = Field(
         default="es",
@@ -214,6 +228,10 @@ class Config(BaseModel):
             "JSON file mapping a chat JID to a local name, used to override "
             "missing WhatsApp contact names for direct-message chats."
         ),
+    )
+    groq_api_key_file: Path = Field(
+        default_factory=default_groq_api_key_file,
+        description="File holding the Groq API key, read when GROQ_API_KEY is unset.",
     )
     allow_git_vault: bool = Field(
         default=False,
@@ -378,6 +396,7 @@ class Config(BaseModel):
             "WA2VAULT_CACHE_DIR": "cache_dir",
             "WA2VAULT_STATE_DIR": "state_dir",
             "WA2VAULT_CONTACTS_FILE": "contacts_file",
+            "WA2VAULT_GROQ_API_KEY_FILE": "groq_api_key_file",
         }
         for env_key, field in env_path.items():
             value = os.environ.get(env_key)
@@ -480,6 +499,7 @@ class Config(BaseModel):
             ("cache_dir", _toml_str(str(self.cache_dir))),
             ("state_dir", _toml_str(str(self.state_dir))),
             ("contacts_file", _toml_str(str(self.contacts_file))),
+            ("groq_api_key_file", _toml_str(str(self.groq_api_key_file))),
             ("allow_git_vault", str(self.allow_git_vault).lower()),
         ]
         return items
@@ -498,6 +518,7 @@ __all__ = [
     "AsrBackend",
     "default_config_path",
     "default_contacts_file",
+    "default_groq_api_key_file",
     "default_cache_dir",
     "default_state_dir",
     "default_vault_dir",

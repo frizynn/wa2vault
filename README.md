@@ -24,7 +24,8 @@ that sends WhatsApp messages.
 - **Stable identity:** profile, chat JID, and message ID prevent collisions when
   chats share or change display names.
 - **Local processing:** faster-whisper transcription runs locally and is cached
-  by every input that can change the result.
+  by every input that can change the result. The opt-in `groq` backend sends
+  voice notes to Groq instead.
 - **Defensive output:** writes are atomic, subprocesses are bounded, generated
   files are private where supported, and vaults inside Git worktrees are refused
   by default.
@@ -120,8 +121,9 @@ not required and must never be used to create fixtures.
 ## Limitations
 
 A linked device only exposes history delivered by WhatsApp. Old media may have
-expired upstream, and a cumulative archive is not proof of completeness. Local
-`faster-whisper` is the supported transcription backend.
+expired upstream, and a cumulative archive is not proof of completeness.
+Transcription runs with local `faster-whisper` by default, or with Whisper hosted
+by Groq when `asr_backend = "groq"`.
 
 ## License
 
