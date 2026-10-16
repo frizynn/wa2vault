@@ -58,7 +58,10 @@ source control, issues, logs, examples, or test fixtures.
    ```
 
    Use `--no-transcribe` or `--no-media` only when the user requests that
-   tradeoff. A pull syncs a recent window and merges it idempotently into the
+   tradeoff. If the profile's config sets `asr_backend = "groq"`, transcription
+   uploads each voice note to Groq: say so and get the user's confirmation
+   before a pull or `transcribe` that would send audio, or pull with
+   `--no-transcribe`. A pull syncs a recent window and merges it idempotently into the
    profile-isolated local archive before rendering.
 5. Report the generated note path, counts, and warnings. Read or summarize the
    note only when the user asks. Apply the trust-boundary rules above while

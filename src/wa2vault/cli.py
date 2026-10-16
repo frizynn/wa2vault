@@ -42,7 +42,8 @@ app = typer.Typer(
     name="wa2vault",
     help=(
         "Read-only WhatsApp chat exporter: pull a chat window via wacli, "
-        "transcribe voice notes locally, and write Markdown into an Obsidian vault. "
+        "transcribe voice notes (locally, or with Groq if configured), "
+        "and write Markdown into an Obsidian vault. "
         "Never sends messages."
     ),
     no_args_is_help=True,
@@ -450,7 +451,8 @@ def transcribe(
 ) -> None:
     """Transcribe a single audio file with the configured ASR backend and print the text.
 
-    Uses the selected profile's local transcription backend and language unless
+    Uses the selected profile's transcription backend (local by default; with
+    ``asr_backend = "groq"`` the file is uploaded to Groq) and language unless
     ``--language`` overrides the hint.
     """
     config = _config(ctx)
@@ -459,7 +461,11 @@ def transcribe(
     from wa2vault.transcribe import get_transcriber
 
     transcriber = get_transcriber(config)
-    result = transcriber.transcribe(audio_path, language=lang)
+    try:
+        result = transcriber.transcribe(audio_path, language=lang)
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.echo(f"Transcription failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(result.text)
 
 

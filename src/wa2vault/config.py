@@ -266,6 +266,17 @@ class Config(BaseModel):
             raise ValueError("wacli_db and wacli_account are mutually exclusive")
         return self
 
+    @model_validator(mode="after")
+    def _groq_needs_a_groq_model(self) -> Config:
+        # Groq's speech models are all whisper-*; a bare size such as "medium" is the
+        # local backend's default left in place, which Groq would reject per note.
+        if self.asr_backend == "groq" and "whisper" not in self.asr_model:
+            raise ValueError(
+                f"asr_model {self.asr_model!r} is not a Groq model; with asr_backend = "
+                "'groq' use one such as 'whisper-large-v3-turbo'"
+            )
+        return self
+
     @property
     def profile_key(self) -> str:
         """Stable, filesystem-safe namespace for this profile."""

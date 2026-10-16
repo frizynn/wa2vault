@@ -91,6 +91,13 @@ gets its own derived state, cache, contacts, note, and media namespace.
 | `groq_api_key_file` | platform config directory (`groq.key`) | `WA2VAULT_GROQ_API_KEY_FILE` | No | File with the Groq API key, read only when `asr_backend = "groq"` and `GROQ_API_KEY` is unset. Keep it at mode 600. |
 | `allow_git_vault` | `false` | `WA2VAULT_ALLOW_GIT_VAULT` | Yes | Explicit opt-in to write private output inside a Git worktree. |
 
+With `asr_backend = "groq"`, a voice note in a format Groq accepts (Ogg, MP3,
+M4A, WAV, FLAC, WebM, or MP4) is uploaded as is; any other format is first
+re-encoded to mono Opus. `command_timeout` bounds each request. The transcript
+cache keys on backend and model, so switching backends transcribes the notes in
+the pull window again. `groq_api_key_file` is a top-level setting that profiles
+cannot override.
+
 `wacli_account` and `wacli_db` are mutually exclusive. Setting both in TOML or
 the environment is an error. If a profile defines one, it replaces the
 top-level source. If it defines neither, it inherits the top-level source or

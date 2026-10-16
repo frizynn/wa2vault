@@ -1,10 +1,10 @@
 """Remote ASR backend: Whisper hosted by Groq (OpenAI-compatible API).
 
 Opt-in with ``asr_backend = "groq"``. Unlike the default local backend, the
-voice note leaves this machine: each file is re-encoded with ffmpeg to 16 kHz
-mono FLAC (Groq's recommended input, and the smallest upload) and sent to Groq
-over HTTPS. Only the standard library is used, so the backend adds no
-dependency.
+voice note leaves this machine. A file in a format Groq accepts (WhatsApp voice
+notes are Opus in Ogg) is uploaded as is, so it stays as small as it was; any
+other format is first re-encoded with ffmpeg to mono 16 kHz Opus. Only the
+standard library is used, so the backend adds no dependency.
 
 The API key comes from ``GROQ_API_KEY`` or, when that is unset, from the file at
 ``groq_api_key_file``. It is read on the first transcription, so a missing key
@@ -14,6 +14,7 @@ becomes a per-audio warning in a pull instead of aborting it.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import tempfile
 import time
@@ -29,11 +30,12 @@ from wa2vault.transcribe.base import Transcriber, TranscriptResult
 ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
 DEFAULT_MODEL = "whisper-large-v3-turbo"
 
-#: faster-whisper model sizes. Seeing one here means the config still names the
-#: local backend's model, which Groq would reject with a less helpful error.
-_LOCAL_MODEL_NAMES = frozenset(
-    {"tiny", "base", "small", "medium", "large", "large-v1", "large-v2", "large-v3", "turbo"}
+#: File types Groq accepts as uploaded. Anything else is re-encoded first.
+GROQ_FORMATS = frozenset(
+    {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
 )
+#: Mono 16 kHz Opus: small, and all the fidelity speech recognition needs.
+REENCODE_ARGS = ["-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "32k"]
 _MAX_RETRY_WAIT_S = 30.0
 
 
@@ -70,29 +72,26 @@ class GroqTranscriber(Transcriber):
 
         Raises:
             FileNotFoundError: If ``audio_path`` does not exist.
-            ValueError: If ``model`` is a faster-whisper size instead of a Groq model.
-            RuntimeError: If the key is missing, ffmpeg fails, or Groq answers with an error.
+            RuntimeError: If the key is missing or malformed, ffmpeg fails, or Groq
+                answers with an error or not at all.
         """
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        if self.model in _LOCAL_MODEL_NAMES:
-            raise ValueError(
-                f"asr_model {self.model!r} is a faster-whisper size; with asr_backend = "
-                f"'groq' use a Groq model such as {DEFAULT_MODEL!r}"
-            )
+        key = self._key()
 
-        with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as tmp:
-            flac_path = Path(tmp.name)
-        try:
-            run_ffmpeg(
-                audio_path,
-                flac_path,
-                ["-ar", "16000", "-ac", "1", "-c:a", "flac"],
-                timeout=self.ffmpeg_timeout,
-            )
-            payload = self._request(flac_path.read_bytes(), language)
-        finally:
-            flac_path.unlink(missing_ok=True)
+        # Only the extension is sent as the file name: Groq needs it to detect the
+        # format, and a local name could carry quotes or private words.
+        suffix = audio_path.suffix.lower()
+        if suffix in GROQ_FORMATS:
+            payload = self._request(key, f"audio{suffix}", audio_path.read_bytes(), language)
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                ogg_path = Path(tmp.name)
+            try:
+                run_ffmpeg(audio_path, ogg_path, REENCODE_ARGS, timeout=self.ffmpeg_timeout)
+                payload = self._request(key, "audio.ogg", ogg_path.read_bytes(), language)
+            finally:
+                ogg_path.unlink(missing_ok=True)
 
         duration = payload.get("duration")
         return TranscriptResult(
@@ -105,59 +104,70 @@ class GroqTranscriber(Transcriber):
     def _key(self) -> str:
         """Return the API key: ``GROQ_API_KEY`` first, then ``api_key_file``."""
         if self._api_key is None:
+            source = "GROQ_API_KEY"
             key = os.environ.get("GROQ_API_KEY", "").strip()
             if not key and self.api_key_file is not None and self.api_key_file.is_file():
+                source = str(self.api_key_file)
                 key = self.api_key_file.read_text(encoding="utf-8").strip()
             if not key:
                 raise RuntimeError(
                     f"Groq needs an API key: set GROQ_API_KEY or write it to {self.api_key_file}"
                 )
+            # The key travels in an HTTP header, and http.client quotes the whole
+            # header in its error when it holds a line break.
+            if any(char.isspace() or not char.isprintable() for char in key):
+                raise RuntimeError(f"The Groq API key in {source} must be one line with no spaces")
             self._api_key = key
         return self._api_key
 
-    def _request(self, audio: bytes, language: str) -> dict[str, Any]:
-        """POST one transcription request, retrying once if Groq rate-limits it."""
-        body, content_type = _multipart(
+    def _request(self, key: str, filename: str, audio: bytes, language: str) -> dict[str, Any]:
+        """POST one transcription, retrying once if Groq rate-limits it briefly."""
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        body, form_type = _multipart(
             {
                 "model": self.model,
                 "language": language,
                 "response_format": "verbose_json",
                 "temperature": "0",
             },
-            ("file", "audio.flac", "audio/flac", audio),
+            ("file", filename, content_type, audio),
         )
         request = urllib.request.Request(
             ENDPOINT,
             data=body,
             method="POST",
             headers={
-                "Authorization": f"Bearer {self._key()}",
-                "Content-Type": content_type,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": form_type,
                 "User-Agent": "wa2vault",
             },
         )
-        for attempt in (1, 2):
+        retried = False
+        while True:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     return json.load(response)
             except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt == 1:
-                    time.sleep(_retry_after(exc))
+                wait = _retry_wait(exc)
+                if exc.code == 429 and not retried and wait is not None:
+                    retried = True
+                    time.sleep(wait)
                     continue
                 detail = exc.read(300).decode("utf-8", "replace").strip()
                 raise RuntimeError(f"Groq answered HTTP {exc.code}: {detail}") from exc
             except urllib.error.URLError as exc:
                 raise RuntimeError(f"Groq is unreachable: {exc.reason}") from exc
-        raise RuntimeError("Groq kept rate-limiting the request")
+            except TimeoutError as exc:
+                raise RuntimeError(f"Groq did not answer within {self.timeout:g}s") from exc
 
 
-def _retry_after(exc: urllib.error.HTTPError) -> float:
-    """Seconds to wait before retrying a 429, from ``Retry-After`` (capped)."""
+def _retry_wait(exc: urllib.error.HTTPError) -> float | None:
+    """Seconds to wait before retrying a 429, or None if Groq asks for longer than the cap."""
     try:
         wait = float(exc.headers.get("retry-after", "5"))
     except (TypeError, ValueError):
         wait = 5.0
-    return min(max(wait, 0.0), _MAX_RETRY_WAIT_S)
+    return max(wait, 0.0) if wait <= _MAX_RETRY_WAIT_S else None
 
 
 def _multipart(fields: dict[str, str], file: tuple[str, str, str, bytes]) -> tuple[bytes, str]:
@@ -180,4 +190,4 @@ def _multipart(fields: dict[str, str], file: tuple[str, str, str, bytes]) -> tup
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-__all__ = ["DEFAULT_MODEL", "ENDPOINT", "GroqTranscriber"]
+__all__ = ["DEFAULT_MODEL", "ENDPOINT", "GROQ_FORMATS", "REENCODE_ARGS", "GroqTranscriber"]
