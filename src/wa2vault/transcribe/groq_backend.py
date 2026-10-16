@@ -14,7 +14,6 @@ becomes a per-audio warning in a pull instead of aborting it.
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 import tempfile
 import time
@@ -30,10 +29,20 @@ from wa2vault.transcribe.base import Transcriber, TranscriptResult
 ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
 DEFAULT_MODEL = "whisper-large-v3-turbo"
 
-#: File types Groq accepts as uploaded. Anything else is re-encoded first.
-GROQ_FORMATS = frozenset(
-    {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
-)
+#: File types Groq accepts as uploaded, with the content type each is sent with.
+#: A fixed table, because :mod:`mimetypes` depends on the machine. Anything else
+#: is re-encoded first.
+GROQ_FORMATS = {
+    ".flac": "audio/flac",
+    ".mp3": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".mpeg": "audio/mpeg",
+    ".mpga": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+}
 #: Mono 16 kHz Opus: small, and all the fidelity speech recognition needs.
 REENCODE_ARGS = ["-ac", "1", "-ar", "16000", "-c:a", "libopus", "-b:a", "32k"]
 _MAX_RETRY_WAIT_S = 30.0
@@ -82,8 +91,11 @@ class GroqTranscriber(Transcriber):
         # Only the extension is sent as the file name: Groq needs it to detect the
         # format, and a local name could carry quotes or private words.
         suffix = audio_path.suffix.lower()
-        if suffix in GROQ_FORMATS:
-            payload = self._request(key, f"audio{suffix}", audio_path.read_bytes(), language)
+        audio = audio_path.read_bytes()
+        # wacli names any audio of an unknown type ".ogg", so the suffix alone is
+        # not proof: a real Ogg file starts with "OggS".
+        if suffix in GROQ_FORMATS and (suffix != ".ogg" or audio.startswith(b"OggS")):
+            payload = self._request(key, f"audio{suffix}", audio, language)
         else:
             with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
                 ogg_path = Path(tmp.name)
@@ -122,7 +134,7 @@ class GroqTranscriber(Transcriber):
 
     def _request(self, key: str, filename: str, audio: bytes, language: str) -> dict[str, Any]:
         """POST one transcription, retrying once if Groq rate-limits it briefly."""
-        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        content_type = GROQ_FORMATS[Path(filename).suffix]
         body, form_type = _multipart(
             {
                 "model": self.model,

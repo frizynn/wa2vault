@@ -64,7 +64,7 @@ def _answer_with(monkeypatch: pytest.MonkeyPatch, *answers: object) -> list[urll
 @pytest.fixture
 def voice_note(tmp_path: Path) -> Path:
     path = tmp_path / "voice note.ogg"
-    path.write_bytes(b"synthetic-ogg")
+    path.write_bytes(b"OggS synthetic")
     return path
 
 
@@ -125,16 +125,21 @@ def test_uploads_an_ogg_voice_note_as_it_is(
     body = request.data
     assert f'name="model"\r\n\r\n{DEFAULT_MODEL}\r\n'.encode() in body
     assert b'name="language"\r\n\r\nes\r\n' in body
-    assert b'filename="audio.ogg"\r\nContent-Type: audio/ogg\r\n\r\nsynthetic-ogg\r\n' in body
+    assert b'filename="audio.ogg"\r\nContent-Type: audio/ogg\r\n\r\nOggS synthetic\r\n' in body
     assert b"voice note" not in body
 
 
 @pytest.mark.usefixtures("key")
-def test_reencodes_a_format_groq_does_not_take(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [("memo.amr", b"synthetic-amr"), ("unknown-type.ogg", b"synthetic-amr")],
+    ids=["format Groq does not take", "audio wacli named .ogg that is not Ogg"],
+)
+def test_reencodes_what_groq_would_not_decode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, content: bytes
 ) -> None:
-    source = tmp_path / "memo.amr"
-    source.write_bytes(b"synthetic-amr")
+    source = tmp_path / name
+    source.write_bytes(content)
     outputs: list[Path] = []
 
     def run(audio_path: Path, out_path: Path, output_args: list[str], *, timeout: float) -> None:

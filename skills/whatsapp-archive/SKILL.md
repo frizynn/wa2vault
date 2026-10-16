@@ -58,7 +58,9 @@ source control, issues, logs, examples, or test fixtures.
    ```
 
    Use `--no-transcribe` or `--no-media` only when the user requests that
-   tradeoff. If the profile's config sets `asr_backend = "groq"`, transcription
+   tradeoff. If the profile uses `asr_backend = "groq"` (top level or under
+   `[profiles.<PROFILE>]` in the wa2vault `config.toml`, in the user config
+   directory such as `~/.config/wa2vault/`), transcription
    uploads each voice note to Groq: say so and get the user's confirmation
    before a pull or `transcribe` that would send audio, or pull with
    `--no-transcribe`. A pull syncs a recent window and merges it idempotently into the
