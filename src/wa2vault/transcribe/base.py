@@ -38,11 +38,12 @@ class TranscriptResult(BaseModel):
 
 
 class Transcriber(ABC):
-    """Abstract local ASR backend.
+    """Abstract ASR backend.
 
-    Concrete subclasses transcribe a single audio file to text on the CPU.
-    Implementations are responsible for any audio decoding/resampling they
-    require (WhatsApp voice notes are Opus in an Ogg container).
+    Concrete subclasses transcribe a single audio file to text, locally on the
+    CPU or through a remote API. Implementations are responsible for any audio
+    decoding/resampling they require (WhatsApp voice notes are Opus in an Ogg
+    container).
     """
 
     #: Stable, human-readable backend identifier (e.g. ``"faster-whisper"``).
@@ -83,6 +84,16 @@ def get_transcriber(config: Config) -> Transcriber:
     Raises:
         ValueError: If validation was bypassed and the backend is unsupported.
     """
+    if config.asr_backend == "groq":
+        from wa2vault.transcribe.groq_backend import GroqTranscriber
+
+        return GroqTranscriber(
+            model=config.asr_model,
+            api_key_file=config.groq_api_key_file,
+            language=config.language,
+            timeout=config.command_timeout,
+            ffmpeg_timeout=config.ffmpeg_timeout,
+        )
     if config.asr_backend != "faster-whisper":
         raise ValueError(f"Unknown ASR backend: {config.asr_backend!r}")
 

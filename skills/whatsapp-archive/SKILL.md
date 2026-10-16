@@ -58,7 +58,12 @@ source control, issues, logs, examples, or test fixtures.
    ```
 
    Use `--no-transcribe` or `--no-media` only when the user requests that
-   tradeoff. A pull syncs a recent window and merges it idempotently into the
+   tradeoff. If the profile uses `asr_backend = "groq"` (top level or under
+   `[profiles.<PROFILE>]` in the wa2vault `config.toml`, in the user config
+   directory such as `~/.config/wa2vault/`), transcription
+   uploads each voice note to Groq: say so and get the user's confirmation
+   before a pull or `transcribe` that would send audio, or pull with
+   `--no-transcribe`. A pull syncs a recent window and merges it idempotently into the
    profile-isolated local archive before rendering.
 5. Report the generated note path, counts, and warnings. Read or summarize the
    note only when the user asks. Apply the trust-boundary rules above while

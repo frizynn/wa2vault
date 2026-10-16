@@ -34,7 +34,7 @@ WacliClient sync/resolve/export
 normalized MessageRecord list
         |
         +--> media cache/copy
-        +--> transcript cache/local ASR
+        +--> transcript cache/ASR (local, or Groq if configured)
         |
         v
 ArchiveStore transactional upsert

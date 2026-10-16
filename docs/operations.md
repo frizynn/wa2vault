@@ -48,7 +48,8 @@ wa2vault --profile personal pull --chat "Example Group" --days 30
 wa2vault --profile work pull --chat "Example Project" --days 14
 ```
 
-Use `--no-transcribe` to skip local ASR or `--no-media` to avoid downloading
+Use `--no-transcribe` to skip transcription (local, or Groq when
+`asr_backend = "groq"`) or `--no-media` to avoid downloading
 attachments. A pull performs these stages:
 
 1. best-effort bounded sync;
